@@ -1,0 +1,8 @@
+/target
+/tmp
+*.log
+*.swp
+teams-cdp-*.json
+secrets.json
+state.toml
+aliases.toml
