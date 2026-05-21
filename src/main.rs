@@ -21,6 +21,7 @@ async fn main() {
         Command::Whoami => commands::whoami::run(cli.json).await,
         Command::ListChats { limit } => commands::list_chats::run(limit, cli.json).await,
         Command::Resolve { target } => commands::resolve::run(&target, cli.json).await,
+        Command::Read { target, limit } => commands::read::run(&target, limit, cli.json).await,
         Command::Send {
             dry_run,
             chat,

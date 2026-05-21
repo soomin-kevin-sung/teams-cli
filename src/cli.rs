@@ -42,6 +42,14 @@ pub enum Command {
         /// Chat thread id, alias, self target (me/self/notes), exact email, exact display name, or exact chat title.
         target: String,
     },
+    /// Read recent messages from an existing 1:1, group, or self notes chat.
+    Read {
+        /// Chat thread id, alias, self target (me/self/notes), exact email, exact display name, or exact chat title.
+        target: String,
+        /// Limit number of messages.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Send a text message to an existing 1:1, group, or self notes chat.
     Send {
         /// Resolve and print the target without sending.

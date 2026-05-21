@@ -9,6 +9,7 @@ Unofficial Microsoft Teams CLI for personal automation. It uses undocumented Tea
 - `teams whoami` — prints cached identity and token expiry information.
 - `teams list-chats [-n N] [--json]` — lists recent group chats using Teams web APIs.
 - `teams resolve <target> [--json]` — resolves a send target without sending a message.
+- `teams read <target> [-n N] [--json]` — reads recent messages from an existing chat.
 - `teams send <target> <message>` — sends plaintext as HTML to an existing 1:1, group, or self notes chat. The target can be a raw thread id, alias, `me`/`self`/`notes`, exact email, exact display name, or exact chat title.
 
 ## Build
@@ -31,6 +32,7 @@ teams whoami
 teams list-chats -n 20
 teams list-chats -n 20 --json
 teams resolve user@example.com --json
+teams read user@example.com -n 20 --json
 teams send --dry-run user@example.com "hello from CLI" --json
 teams send "19:example-thread-id@thread.v2" "hello from CLI"
 teams send user@example.com "hello from CLI"
@@ -49,11 +51,12 @@ Use `--json` for machine-readable success output and structured errors. Success 
 
 ```powershell
 teams --json resolve user@example.com
+teams --json read user@example.com -n 20
 teams --json send --dry-run user@example.com "hello from agent"
 teams --json send user@example.com "hello from agent"
 ```
 
-`resolve` and `send --dry-run` use the same target resolution as `send`, so an agent can verify the exact `thread_id` before sending. Ambiguous targets fail with `error.code = "ambiguous_target"` and include up to 10 candidate chats in `error.details.candidates`.
+`resolve`, `read`, and `send --dry-run` use the same target resolution as `send`, so an agent can verify the exact `thread_id`, read recent context, and then send. Ambiguous targets fail with `error.code = "ambiguous_target"` and include up to 10 candidate chats in `error.details.candidates`.
 
 `teams login --tenant <tenant-id-or-domain>` overrides the default `organizations` tenant. If your tenant blocks device-code flow, login returns a Conditional Access error; browser-cookie/MSAL extraction fallback is not implemented in this MVP.
 
@@ -89,4 +92,5 @@ teams send util "hello"
 - Channel posts, file uploads, reactions, and creating new 1:1 threads are not implemented.
 - Group and channel roster expansion is not implemented; `members` is currently most complete for 1:1 chats.
 - `send` can resolve only existing chats returned by `list-chats`; it does not create a new 1:1 conversation for an email that has no existing chat. Self notes require Teams to expose the `48:notes` thread.
+- `read` uses undocumented Teams message endpoints and normalizes common response shapes; some rich cards, reactions, and specialized attachments may be simplified.
 - Logout deletes local state only; already-issued tokens expire naturally.

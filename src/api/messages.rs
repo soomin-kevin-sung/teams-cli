@@ -1,4 +1,5 @@
 use super::client::{ApiClient, ApiError, AuthStyle};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
@@ -46,6 +47,51 @@ pub struct SentMessage {
     pub client_message_id: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<MessageSender>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_html: Option<String>,
+    pub attachments: Vec<MessageAttachment>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MessageSender {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_principal_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MessageAttachment {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 pub async fn send_message(
     api: &ApiClient,
     thread_id: &str,
@@ -80,6 +126,65 @@ pub async fn send_message(
     })
 }
 
+pub async fn read_messages(
+    api: &ApiClient,
+    thread_id: &str,
+    limit: usize,
+) -> Result<Vec<ChatMessage>, ApiError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let encoded_thread_id = percent_encode_path_segment(thread_id);
+    let chat_service = api.chat_service().await;
+    let chat_svc_agg = api.chat_svc_agg().await;
+    let candidates = [
+        (
+            format!(
+                "{chat_service}/v1/users/ME/conversations/{encoded_thread_id}/messages?view=msnp24Equivalent&pageSize={limit}"
+            ),
+            AuthStyle::SkypeHeader,
+        ),
+        (
+            format!(
+                "{chat_service}/v1/users/ME/conversations/{encoded_thread_id}/messages?view=msnp24Equivalent"
+            ),
+            AuthStyle::SkypeHeader,
+        ),
+        (
+            format!(
+                "{chat_svc_agg}/api/v1/users/ME/conversations/{encoded_thread_id}/messages?view=msnp24Equivalent&pageSize={limit}"
+            ),
+            AuthStyle::SkypeHeader,
+        ),
+        (
+            format!(
+                "{chat_service}/v1/users/ME/conversations/{encoded_thread_id}/messages?pageSize={limit}"
+            ),
+            AuthStyle::BearerSkype,
+        ),
+    ];
+
+    let mut last_error = None;
+    for (url, style) in candidates {
+        match api.get_json::<serde_json::Value>(&url, style).await {
+            Ok(value) => {
+                let mut messages = normalize_messages(&value);
+                messages.truncate(limit);
+                return Ok(messages);
+            }
+            Err(ApiError::Http { status, body }) if matches!(status, 400 | 401 | 403 | 404) => {
+                last_error = Some(ApiError::Http { status, body });
+            }
+            Err(ApiError::NotFound(body)) => last_error = Some(ApiError::NotFound(body)),
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| ApiError::NotFound("no message endpoint succeeded".to_string())))
+}
+
 pub fn html_escape(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -91,6 +196,258 @@ pub fn html_escape(input: &str) -> String {
 
 pub fn percent_encode_path_segment(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
+}
+
+fn normalize_messages(value: &serde_json::Value) -> Vec<ChatMessage> {
+    candidate_message_arrays(value)
+        .into_iter()
+        .flat_map(|array| array.iter())
+        .filter_map(normalize_message)
+        .collect()
+}
+
+fn candidate_message_arrays(value: &serde_json::Value) -> Vec<&Vec<serde_json::Value>> {
+    let mut arrays = Vec::new();
+    if let Some(array) = value.as_array() {
+        arrays.push(array);
+    }
+    for key in ["messages", "value", "items", "results"] {
+        if let Some(array) = value.get(key).and_then(serde_json::Value::as_array) {
+            arrays.push(array);
+        }
+    }
+    if let Some(array) = value
+        .pointer("/conversation/messages")
+        .and_then(serde_json::Value::as_array)
+    {
+        arrays.push(array);
+    }
+    arrays
+}
+
+fn normalize_message(value: &serde_json::Value) -> Option<ChatMessage> {
+    let content_html = string_at(value, &["content", "body", "html", "message"])
+        .or_else(|| value.pointer("/body/content").and_then(as_string));
+    let content_text = content_html
+        .as_deref()
+        .map(html_to_text)
+        .filter(|text| !text.is_empty())
+        .or_else(|| string_at(value, &["text", "plainText", "preview"]));
+    let message = ChatMessage {
+        id: string_at(value, &["id", "messageId", "serverMessageId"]),
+        client_message_id: string_at(value, &["clientmessageid", "clientMessageId"]),
+        created_at: first_datetime(
+            value,
+            &[
+                "/originalarrivaltime",
+                "/originalArrivalTime",
+                "/composetime",
+                "/composeTime",
+                "/createdDateTime",
+                "/created_at",
+                "/timestamp",
+            ],
+        ),
+        sender: sender_from_message(value),
+        message_type: string_at(value, &["messagetype", "messageType", "type"]),
+        content_type: string_at(value, &["contenttype", "contentType"])
+            .or_else(|| value.pointer("/body/contentType").and_then(as_string)),
+        content_text,
+        content_html,
+        attachments: attachments_from_message(value),
+    };
+    (message.id.is_some()
+        || message.client_message_id.is_some()
+        || message.content_text.is_some()
+        || message.content_html.is_some())
+    .then_some(message)
+}
+
+fn sender_from_message(value: &serde_json::Value) -> Option<MessageSender> {
+    let from = value.get("from");
+    let mut sender = MessageSender {
+        mri: string_at(value, &["from", "sender", "user"])
+            .filter(|text| text.starts_with("8:"))
+            .or_else(|| from.and_then(|from| string_at(from, &["mri", "id", "userId"])))
+            .or_else(|| value.pointer("/from/user/id").and_then(as_string)),
+        object_id: from
+            .and_then(|from| {
+                string_at(
+                    from,
+                    &["objectId", "aadObjectId", "aadId", "oid", "userObjectId"],
+                )
+            })
+            .or_else(|| value.pointer("/from/user/objectId").and_then(as_string)),
+        display_name: string_at(value, &["imdisplayname", "imDisplayName", "displayName"])
+            .or_else(|| from.and_then(|from| string_at(from, &["displayName", "name"])))
+            .or_else(|| value.pointer("/from/user/displayName").and_then(as_string)),
+        user_principal_name: from
+            .and_then(|from| string_at(from, &["userPrincipalName", "upn", "email", "mail"]))
+            .or_else(|| {
+                value
+                    .pointer("/from/user/userPrincipalName")
+                    .and_then(as_string)
+            }),
+    };
+    if sender.object_id.is_none() {
+        sender.object_id = oid_from_mri(sender.mri.as_deref());
+    }
+    (!is_empty_sender(&sender)).then_some(sender)
+}
+
+fn attachments_from_message(value: &serde_json::Value) -> Vec<MessageAttachment> {
+    ["attachments", "files"]
+        .iter()
+        .filter_map(|key| value.get(*key).and_then(serde_json::Value::as_array))
+        .flat_map(|attachments| attachments.iter())
+        .filter_map(attachment_from_value)
+        .collect()
+}
+
+fn attachment_from_value(value: &serde_json::Value) -> Option<MessageAttachment> {
+    let attachment = MessageAttachment {
+        id: string_at(value, &["id", "itemid", "itemId"]),
+        name: string_at(value, &["name", "title", "filename", "fileName"]),
+        content_type: string_at(value, &["contentType", "contenttype", "type"]),
+        url: string_at(
+            value,
+            &[
+                "url",
+                "contentUrl",
+                "contenturl",
+                "downloadUrl",
+                "previewUrl",
+            ],
+        ),
+    };
+    (attachment.id.is_some()
+        || attachment.name.is_some()
+        || attachment.content_type.is_some()
+        || attachment.url.is_some())
+    .then_some(attachment)
+}
+
+fn string_at(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(as_string))
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn as_string(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(ToString::to_string)
+}
+
+fn first_datetime(value: &serde_json::Value, pointers: &[&str]) -> Option<DateTime<Utc>> {
+    pointers.iter().find_map(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(as_string)
+            .and_then(|text| DateTime::parse_from_rfc3339(&text).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+    })
+}
+
+fn html_to_text(input: &str) -> String {
+    let mut text = input.replace("\r\n", "\n");
+    text = text
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("<br>", "\n")
+        .replace("</p>", "\n")
+        .replace("</div>", "\n");
+    decode_entities(&strip_tags(&text))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+    output
+}
+
+fn decode_entities(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '&' {
+            output.push(ch);
+            continue;
+        }
+        let mut entity = String::new();
+        while let Some(&next) = chars.peek() {
+            chars.next();
+            if next == ';' {
+                break;
+            }
+            if entity.len() > 12 {
+                break;
+            }
+            entity.push(next);
+        }
+        match decode_entity(&entity) {
+            Some(decoded) => output.push(decoded),
+            None => {
+                output.push('&');
+                output.push_str(&entity);
+                output.push(';');
+            }
+        }
+    }
+    output
+}
+
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            u32::from_str_radix(&entity[2..], 16)
+                .ok()
+                .and_then(char::from_u32)
+        }
+        _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
+        _ => None,
+    }
+}
+
+fn oid_from_mri(value: Option<&str>) -> Option<String> {
+    value
+        .and_then(|mri| mri.strip_prefix("8:orgid:"))
+        .filter(|oid| looks_like_guid(oid))
+        .map(ToString::to_string)
+}
+
+fn looks_like_guid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|index| bytes[*index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+}
+
+fn is_empty_sender(sender: &MessageSender) -> bool {
+    sender.mri.is_none()
+        && sender.object_id.is_none()
+        && sender.display_name.is_none()
+        && sender.user_principal_name.is_none()
 }
 
 #[cfg(test)]
@@ -130,5 +487,83 @@ mod tests {
         let response: SendMessageResponse = serde_json::from_str("{}").expect("response");
 
         assert_eq!(response.server_message_id(), None);
+    }
+
+    #[test]
+    fn normalizes_chat_service_messages() {
+        let value = serde_json::json!({
+            "messages": [
+                {
+                    "id": "msg1",
+                    "clientmessageid": "client1",
+                    "from": "8:orgid:11111111-1111-1111-1111-111111111111",
+                    "imdisplayname": "Alex",
+                    "originalarrivaltime": "2026-05-21T01:02:03Z",
+                    "messagetype": "RichText/Html",
+                    "contenttype": "text",
+                    "content": "<p>Hello&nbsp;<b>world</b></p>",
+                    "attachments": [
+                        {
+                            "id": "file1",
+                            "name": "report.pdf",
+                            "contentType": "reference",
+                            "contentUrl": "https://example.test/report.pdf"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let messages = normalize_messages(&value);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id.as_deref(), Some("msg1"));
+        assert_eq!(messages[0].content_text.as_deref(), Some("Hello world"));
+        assert_eq!(
+            messages[0]
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.display_name.as_deref()),
+            Some("Alex")
+        );
+        assert_eq!(
+            messages[0].attachments[0].name.as_deref(),
+            Some("report.pdf")
+        );
+    }
+
+    #[test]
+    fn normalizes_graph_like_messages() {
+        let value = serde_json::json!({
+            "value": [
+                {
+                    "id": "msg2",
+                    "createdDateTime": "2026-05-21T01:02:03Z",
+                    "from": {
+                        "user": {
+                            "id": "8:orgid:22222222-2222-2222-2222-222222222222",
+                            "displayName": "Blair",
+                            "userPrincipalName": "blair@example.com"
+                        }
+                    },
+                    "body": {
+                        "contentType": "html",
+                        "content": "<div>Line 1<br>Line 2</div>"
+                    }
+                }
+            ]
+        });
+
+        let messages = normalize_messages(&value);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content_text.as_deref(), Some("Line 1 Line 2"));
+        assert_eq!(
+            messages[0]
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.user_principal_name.as_deref()),
+            Some("blair@example.com")
+        );
     }
 }
