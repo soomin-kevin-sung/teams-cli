@@ -1,6 +1,7 @@
 use crate::auth::AuthError;
 use crate::config::{AppPaths, State};
 use crate::error::CliError;
+use crate::util::json::print_pretty;
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 
@@ -11,18 +12,20 @@ pub async fn run(json_output: bool) -> Result<(), CliError> {
         .ok_or(AuthError::NotLoggedIn)?;
 
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "displayName": state.identity.display_name,
+        print_pretty(&json!({
+            "ok": true,
+            "identity": {
+                "display_name": state.identity.display_name,
                 "upn": state.identity.upn,
-                "oid": state.identity.user_oid,
-                "tid": state.identity.tenant_id,
-                "aadExp": state.expiry.aad_access_exp,
-                "skypeExp": state.expiry.skype_exp,
-                "regionGtms": state.region_gtms,
-            }))?
-        );
+                "object_id": state.identity.user_oid,
+                "tenant_id": state.identity.tenant_id
+            },
+            "expiry": {
+                "aad_access_exp": state.expiry.aad_access_exp,
+                "skype_exp": state.expiry.skype_exp
+            },
+            "region_gtms": state.region_gtms
+        }))?;
         return Ok(());
     }
 

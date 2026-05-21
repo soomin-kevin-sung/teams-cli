@@ -33,7 +33,7 @@ fn member_labels(chat: &ChatSummary) -> Vec<String> {
 
 fn short_id(id: &str) -> String {
     if id.len() > 16 {
-        format!("{}…", &id[..16])
+        format!("{}...", &id[..16])
     } else {
         id.to_string()
     }

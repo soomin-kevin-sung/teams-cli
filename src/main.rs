@@ -7,7 +7,7 @@ mod error;
 mod util;
 
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{AliasCommand, CacheCommand, Cli, Command};
 use error::CliError;
 use serde_json::json;
 use std::ffi::OsStr;
@@ -19,17 +19,61 @@ async fn main() {
     init_tracing(cli.verbose);
 
     let result = match cli.cmd {
-        Command::Login { force, tenant } => commands::login::run(force, &tenant).await,
-        Command::Logout => commands::logout::run().await,
+        Command::Login { force, tenant } => commands::login::run(force, &tenant, cli.json).await,
+        Command::Logout => commands::logout::run(cli.json).await,
         Command::Whoami => commands::whoami::run(cli.json).await,
-        Command::ListChats { limit } => commands::list_chats::run(limit, cli.json).await,
+        Command::ListChats {
+            limit,
+            include_preview,
+        } => commands::list_chats::run(limit, include_preview, cli.json).await,
+        Command::SearchChats { query, limit } => {
+            commands::search_chats::run(&query, limit, cli.json).await
+        }
         Command::Resolve { target } => commands::resolve::run(&target, cli.json).await,
-        Command::Read { target, limit } => commands::read::run(&target, limit, cli.json).await,
+        Command::Read {
+            target,
+            limit,
+            since,
+            before,
+        } => {
+            commands::read::run(
+                &target,
+                limit,
+                since.as_deref(),
+                before.as_deref(),
+                cli.json,
+            )
+            .await
+        }
         Command::Send {
             dry_run,
+            stdin,
+            confirm_thread_id,
             chat,
             message,
-        } => commands::send::run(&chat, &message, dry_run, cli.json).await,
+        } => {
+            commands::send::run(
+                &chat,
+                message.as_deref(),
+                stdin,
+                confirm_thread_id.as_deref(),
+                dry_run,
+                cli.json,
+            )
+            .await
+        }
+        Command::Alias { cmd } => match cmd {
+            AliasCommand::List => commands::alias::list(cli.json).await,
+            AliasCommand::Set { name, thread_id } => {
+                commands::alias::set(&name, &thread_id, cli.json).await
+            }
+            AliasCommand::Remove { name } => commands::alias::remove(&name, cli.json).await,
+        },
+        Command::Cache { cmd } => match cmd {
+            CacheCommand::Info => commands::cache::info(cli.json).await,
+            CacheCommand::Refresh { limit } => commands::cache::refresh(limit, cli.json).await,
+            CacheCommand::Clear => commands::cache::clear(cli.json).await,
+        },
     };
 
     if let Err(error) = result {

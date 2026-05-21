@@ -76,14 +76,14 @@ impl Session {
     ) -> Result<Self, AuthError> {
         let device_code = oauth::request_device_code(http, tenant).await?;
         if let Some(message) = &device_code.message {
-            println!("{message}");
+            eprintln!("{message}");
         } else {
-            println!(
+            eprintln!(
                 "To sign in, open {} and enter the code: {}",
                 device_code.verification_uri, device_code.user_code
             );
         }
-        println!(
+        eprintln!(
             "Waiting for sign-in... (expires in {}m)",
             device_code.expires_in / 60
         );

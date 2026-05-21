@@ -86,6 +86,10 @@ impl ApiClient {
         self.session.lock().await.state.identity.user_oid.clone()
     }
 
+    pub async fn tenant_id(&self) -> String {
+        self.session.lock().await.state.identity.tenant_id.clone()
+    }
+
     pub async fn upn(&self) -> String {
         self.session.lock().await.state.identity.upn.clone()
     }

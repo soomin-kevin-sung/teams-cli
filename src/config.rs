@@ -1,3 +1,4 @@
+use crate::util::fs::{recover_backup, write_atomic};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -59,6 +60,7 @@ pub struct Expiry {
 
 impl State {
     pub fn load(path: &Path) -> Result<Option<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        recover_backup(path)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -70,10 +72,7 @@ impl State {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, toml::to_string_pretty(self)?)?;
+        write_atomic(path, &toml::to_string_pretty(self)?)?;
         Ok(())
     }
 

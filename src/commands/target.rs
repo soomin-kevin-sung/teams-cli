@@ -1,10 +1,10 @@
 use crate::api::{chats, client::ApiClient};
 use crate::config::AppPaths;
 use crate::error::CliError;
+use crate::util::chat_cache;
 use crate::util::chat_ref::{resolve, ChatRef};
 use serde::Serialize;
 use serde_json::json;
-use std::fs;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,7 +41,7 @@ pub async fn resolve_send_target(
     if let Some(resolution) = resolve_local_target(paths, target)? {
         return Ok(resolution);
     }
-    lookup_fresh_thread_id(api, paths, target).await
+    lookup_thread_id(api, paths, target).await
 }
 
 pub fn resolve_local_target(
@@ -50,18 +50,23 @@ pub fn resolve_local_target(
 ) -> Result<Option<TargetResolution>, CliError> {
     match resolve(target, &paths.aliases)? {
         ChatRef::ThreadId(thread_id) => Ok(Some(thread_resolution(target, thread_id))),
-        ChatRef::Lookup(value) => resolve_cached_lookup(paths, &value),
+        ChatRef::Lookup(_) => Ok(None),
     }
 }
 
-async fn lookup_fresh_thread_id(
+async fn lookup_thread_id(
     api: &ApiClient,
     paths: &AppPaths,
     target: &str,
 ) -> Result<TargetResolution, CliError> {
+    let owner = chat_cache::owner_from_api(api).await;
+    let cached = chat_cache::load_for_owner(paths, &owner)?;
     if is_self_target(target) {
+        if let Some(chat) = find_self_chat(&cached) {
+            return Ok(target_resolution(target, chat, TargetSource::SelfTarget));
+        }
         let fresh = chats::list_chats(api, 100).await?;
-        cache_chats(paths, &fresh)?;
+        chat_cache::write(paths, &owner, &fresh)?;
         if let Some(chat) = find_self_chat(&fresh) {
             return Ok(target_resolution(target, chat, TargetSource::SelfTarget));
         }
@@ -73,8 +78,12 @@ async fn lookup_fresh_thread_id(
         ));
     }
 
+    if let Some(resolution) = resolve_from_chats(target, &cached, TargetSource::CachedChats)? {
+        return Ok(resolution);
+    }
+
     let fresh = chats::list_chats(api, 100).await?;
-    cache_chats(paths, &fresh)?;
+    chat_cache::write(paths, &owner, &fresh)?;
     if let Some(resolution) = resolve_from_chats(target, &fresh, TargetSource::FreshChats)? {
         return Ok(resolution);
     }
@@ -82,27 +91,14 @@ async fn lookup_fresh_thread_id(
     Err(CliError::structured(
         "target_not_found",
         format!(
-            "could not resolve chat target '{target}'. Pass a raw 19:... thread id, define an alias in {}, or run `teams list-chats -n 100 --json` to inspect available chats.",
-            paths.aliases.display()
+            "could not resolve chat target '{target}'. Pass a raw 19:... thread id, define an alias, or run `teams list-chats -n 100 --json` to inspect available chats."
         ),
         json!({
             "target": target,
-            "aliases_path": paths.aliases.display().to_string()
+            "alias_file": "aliases.toml"
         }),
         2,
     ))
-}
-
-fn resolve_cached_lookup(
-    paths: &AppPaths,
-    target: &str,
-) -> Result<Option<TargetResolution>, CliError> {
-    let cached = load_cached_chats(paths)?;
-    if is_self_target(target) {
-        return Ok(find_self_chat(&cached)
-            .map(|chat| target_resolution(target, chat, TargetSource::SelfTarget)));
-    }
-    resolve_from_chats(target, &cached, TargetSource::CachedChats)
 }
 
 fn thread_resolution(target: &str, thread_id: String) -> TargetResolution {
@@ -116,23 +112,6 @@ fn thread_resolution(target: &str, thread_id: String) -> TargetResolution {
         },
         chat: None,
     }
-}
-
-fn load_cached_chats(paths: &AppPaths) -> Result<Vec<chats::ChatSummary>, CliError> {
-    let path = paths.cache_dir.join("chats.json");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
-}
-
-fn cache_chats(paths: &AppPaths, chats: &[chats::ChatSummary]) -> Result<(), CliError> {
-    fs::create_dir_all(&paths.cache_dir)?;
-    fs::write(
-        paths.cache_dir.join("chats.json"),
-        serde_json::to_string_pretty(chats)?,
-    )?;
-    Ok(())
 }
 
 fn resolve_from_chats(

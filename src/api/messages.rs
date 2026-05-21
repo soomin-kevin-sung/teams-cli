@@ -58,6 +58,8 @@ pub struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender: Option<MessageSender>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_is_self: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
@@ -89,6 +91,8 @@ pub struct MessageAttachment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_url: Option<bool>,
+    #[serde(skip_serializing)]
     pub url: Option<String>,
 }
 
@@ -259,6 +263,7 @@ fn normalize_message(value: &serde_json::Value) -> Option<ChatMessage> {
             ],
         ),
         sender: sender_from_message(value),
+        sender_is_self: None,
         message_type: string_at(value, &["messagetype", "messageType", "type"]),
         content_type: string_at(value, &["contenttype", "contentType"])
             .or_else(|| value.pointer("/body/contentType").and_then(as_string)),
@@ -331,20 +336,22 @@ fn attachments_from_message(value: &serde_json::Value) -> Vec<MessageAttachment>
 }
 
 fn attachment_from_value(value: &serde_json::Value) -> Option<MessageAttachment> {
+    let url = string_at(
+        value,
+        &[
+            "url",
+            "contentUrl",
+            "contenturl",
+            "downloadUrl",
+            "previewUrl",
+        ],
+    );
     let attachment = MessageAttachment {
         id: string_at(value, &["id", "itemid", "itemId"]),
         name: string_at(value, &["name", "title", "filename", "fileName"]),
         content_type: string_at(value, &["contentType", "contenttype", "type"]),
-        url: string_at(
-            value,
-            &[
-                "url",
-                "contentUrl",
-                "contenturl",
-                "downloadUrl",
-                "previewUrl",
-            ],
-        ),
+        has_url: url.is_some().then_some(true),
+        url,
     };
     (attachment.id.is_some()
         || attachment.name.is_some()
@@ -590,6 +597,12 @@ mod tests {
             messages[0].attachments[0].name.as_deref(),
             Some("report.pdf")
         );
+        let serialized = serde_json::to_value(&messages[0]).expect("serialize");
+        assert_eq!(
+            serialized["attachments"][0]["has_url"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(serialized["attachments"][0].get("url").is_none());
     }
 
     #[test]

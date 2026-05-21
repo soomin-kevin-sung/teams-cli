@@ -1,4 +1,5 @@
 use crate::error::CliError;
+use crate::util::fs::recover_backup;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -28,6 +29,14 @@ pub fn resolve(input: &str, aliases_path: &Path) -> Result<ChatRef, CliError> {
 }
 
 fn alias_lookup(alias: &str, aliases_path: &Path) -> Result<Option<String>, CliError> {
+    recover_backup(aliases_path).map_err(|error| {
+        alias_config_error(
+            aliases_path,
+            "could not recover aliases file",
+            "recover_error",
+            Some(error.kind().to_string()),
+        )
+    })?;
     if !aliases_path.exists() {
         return Ok(None);
     }
@@ -47,20 +56,38 @@ fn alias_lookup(alias: &str, aliases_path: &Path) -> Result<Option<String>, CliE
             None,
         )
     })?;
+    validate_alias_values(aliases_path, &aliases)?;
     Ok(aliases.aliases.get(alias).cloned())
 }
 
+fn validate_alias_values(path: &Path, aliases: &Aliases) -> Result<(), CliError> {
+    if aliases.aliases.values().all(|value| is_thread_id(value)) {
+        Ok(())
+    } else {
+        Err(alias_config_error(
+            path,
+            "aliases file contains a non-thread-id value",
+            "invalid_value",
+            None,
+        ))
+    }
+}
+
+fn is_thread_id(value: &str) -> bool {
+    value.starts_with("19:") || value.starts_with("48:")
+}
+
 fn alias_config_error(
-    path: &Path,
+    _path: &Path,
     message: &'static str,
     reason: &'static str,
     diagnostic: Option<String>,
 ) -> CliError {
     CliError::structured(
         "alias_config_error",
-        format!("{message}: {}", path.display()),
+        format!("{message}: aliases.toml"),
         json!({
-            "path": path.display().to_string(),
+            "file": "aliases.toml",
             "reason": reason,
             "diagnostic": diagnostic
         }),

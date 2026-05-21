@@ -49,8 +49,12 @@ impl CliError {
             Self::Structured { exit_code, .. } => *exit_code,
             Self::Auth(AuthError::NotLoggedIn) => 10,
             Self::Auth(AuthError::BlockedByCa) | Self::Auth(AuthError::Aad { .. }) => 11,
+            Self::Api(ApiError::Http {
+                status: 401 | 403, ..
+            }) => 11,
             Self::Api(ApiError::NotFound(_)) => 20,
             Self::Api(ApiError::RateLimited) => 30,
+            Self::Api(ApiError::Http { .. }) => 40,
             Self::Api(ApiError::Transport(_)) => 40,
             Self::Http(_) | Self::Io(_) => 40,
             _ => 1,
@@ -124,5 +128,20 @@ mod tests {
         assert_eq!(error.to_exit_code(), 2);
         assert_eq!(error.code(), "ambiguous_target");
         assert_eq!(error.to_json()["error"]["details"]["candidates"][0], 1);
+    }
+
+    #[test]
+    fn http_errors_use_documented_exit_codes() {
+        let auth = CliError::Api(ApiError::Http {
+            status: 403,
+            body: "redacted".into(),
+        });
+        let server = CliError::Api(ApiError::Http {
+            status: 500,
+            body: "redacted".into(),
+        });
+
+        assert_eq!(auth.to_exit_code(), 11);
+        assert_eq!(server.to_exit_code(), 40);
     }
 }
