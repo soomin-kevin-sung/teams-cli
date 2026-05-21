@@ -409,7 +409,8 @@ fn normalize_chat(
     )?;
     let title = string_at(value, &["topic", "displayName", "title", "name"])
         .or_else(|| value.pointer("/threadProperties/topic").and_then(as_string))
-        .or_else(|| value.pointer("/conversation/topic").and_then(as_string));
+        .or_else(|| value.pointer("/conversation/topic").and_then(as_string))
+        .or_else(|| default_system_title(&id));
     let members = extract_members(value, user_index);
     let kind = infer_kind(&id, value, &members);
     let last_message_preview = string_at(
@@ -443,6 +444,13 @@ fn normalize_chat(
         last_message_preview,
         members,
     })
+}
+
+fn default_system_title(id: &str) -> Option<String> {
+    match id {
+        "48:notes" => Some("Self notes".to_string()),
+        _ => None,
+    }
 }
 
 fn user_index(value: &serde_json::Value) -> BTreeMap<String, ChatMember> {
@@ -901,5 +909,14 @@ mod tests {
             &Some("Other User".to_string()),
             &member
         ));
+    }
+
+    #[test]
+    fn labels_self_notes_system_chat() {
+        let value = serde_json::json!({ "id": "48:notes" });
+        let chat = normalize_chat(&value, &BTreeMap::new()).expect("chat");
+
+        assert!(matches!(chat.kind, ChatKind::System));
+        assert_eq!(chat.title.as_deref(), Some("Self notes"));
     }
 }

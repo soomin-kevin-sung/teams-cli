@@ -8,7 +8,7 @@ Unofficial Microsoft Teams CLI for personal automation. It uses undocumented Tea
 - `teams logout` — removes local tokens and state. No server-side revocation is performed.
 - `teams whoami` — prints cached identity and token expiry information.
 - `teams list-chats [-n N] [--json]` — lists recent group chats using Teams web APIs.
-- `teams send <target> <message>` — sends plaintext as HTML to an existing 1:1 or group chat. The target can be a raw thread id, alias, exact email, exact display name, or exact chat title.
+- `teams send <target> <message>` — sends plaintext as HTML to an existing 1:1, group, or self notes chat. The target can be a raw thread id, alias, `me`/`self`/`notes`, exact email, exact display name, or exact chat title.
 
 ## Build
 
@@ -32,10 +32,12 @@ teams list-chats -n 20 --json
 teams send "19:example-thread-id@thread.v2" "hello from CLI"
 teams send user@example.com "hello from CLI"
 teams send "Project room" "hello from CLI"
+teams send me "note to myself"
 teams logout
 ```
 
 `list-chats --json` includes `members` as structured user metadata when Teams exposes it. For 1:1 chats, the CLI resolves both the signed-in user and the peer with `mri`, `object_id`, `display_name`, and `user_principal_name` when available.
+When Teams exposes the self notes conversation, `send` resolves `me`, `self`, `myself`, `notes`, `self notes`, `saved messages`, or `chat with self` to the `48:notes` thread.
 
 `teams login --tenant <tenant-id-or-domain>` overrides the default `organizations` tenant. If your tenant blocks device-code flow, login returns a Conditional Access error; browser-cookie/MSAL extraction fallback is not implemented in this MVP.
 
@@ -70,5 +72,5 @@ teams send util "hello"
 - Device-code flow may be blocked by Conditional Access.
 - Channel posts, file uploads, reactions, and creating new 1:1 threads are not implemented.
 - Group and channel roster expansion is not implemented; `members` is currently most complete for 1:1 chats.
-- `send` can resolve only existing chats returned by `list-chats`; it does not create a new 1:1 conversation for an email that has no existing chat.
+- `send` can resolve only existing chats returned by `list-chats`; it does not create a new 1:1 conversation for an email that has no existing chat. Self notes require Teams to expose the `48:notes` thread.
 - Logout deletes local state only; already-issued tokens expire naturally.

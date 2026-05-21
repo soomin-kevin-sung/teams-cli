@@ -40,6 +40,10 @@ async fn lookup_thread_id(
     paths: &AppPaths,
     target: &str,
 ) -> Result<String, CliError> {
+    if is_self_target(target) {
+        return lookup_self_thread_id(api, paths).await;
+    }
+
     let cached = load_cached_chats(paths)?;
     match unique_match(target, &cached) {
         Ok(Some(thread_id)) => return Ok(thread_id),
@@ -57,6 +61,24 @@ async fn lookup_thread_id(
         "could not resolve chat target '{target}'. Pass a raw 19:… thread id, define an alias in {}, or run `teams list-chats -n 100 --json` to inspect available chats.",
         paths.aliases.display()
     )))
+}
+
+async fn lookup_self_thread_id(api: &ApiClient, paths: &AppPaths) -> Result<String, CliError> {
+    let cached = load_cached_chats(paths)?;
+    if let Some(thread_id) = find_self_thread_id(&cached) {
+        return Ok(thread_id);
+    }
+
+    let fresh = chats::list_chats(api, 100).await?;
+    cache_chats(paths, &fresh)?;
+    if let Some(thread_id) = find_self_thread_id(&fresh) {
+        return Ok(thread_id);
+    }
+
+    Err(CliError::Other(
+        "could not resolve self chat. Run `teams list-chats -n 100 --json` and look for the Teams self notes thread, or pass `48:notes` directly if your tenant exposes it."
+            .to_string(),
+    ))
 }
 
 fn load_cached_chats(paths: &AppPaths) -> Result<Vec<chats::ChatSummary>, CliError> {
@@ -110,6 +132,27 @@ fn is_sendable_chat(chat: &&chats::ChatSummary) -> bool {
         chat.kind,
         chats::ChatKind::OneToOne | chats::ChatKind::Group
     )
+}
+
+fn is_self_target(target: &str) -> bool {
+    matches!(
+        normalize(target).as_str(),
+        "me" | "self" | "myself" | "notes" | "self notes" | "saved messages" | "chat with self"
+    )
+}
+
+fn find_self_thread_id(chats: &[chats::ChatSummary]) -> Option<String> {
+    chats
+        .iter()
+        .find(|chat| chat.id.eq_ignore_ascii_case("48:notes"))
+        .or_else(|| chats.iter().find(|chat| is_self_only_one_to_one(chat)))
+        .map(|chat| chat.id.clone())
+}
+
+fn is_self_only_one_to_one(chat: &chats::ChatSummary) -> bool {
+    matches!(chat.kind, chats::ChatKind::OneToOne)
+        && !chat.members.is_empty()
+        && chat.members.iter().all(is_self_member)
 }
 
 fn chat_matches_target(chat: &chats::ChatSummary, target: &str) -> bool {
@@ -287,5 +330,35 @@ mod tests {
             .expect_err("channel")
             .to_string()
             .contains("channels is not implemented"));
+    }
+
+    #[test]
+    fn recognizes_self_targets() {
+        assert!(is_self_target("me"));
+        assert!(is_self_target("Self"));
+        assert!(is_self_target("self notes"));
+        assert!(!is_self_target("current user"));
+    }
+
+    #[test]
+    fn resolves_system_notes_as_self_thread() {
+        let chats = vec![chat("48:notes", ChatKind::System, None, Vec::new())];
+
+        assert_eq!(find_self_thread_id(&chats), Some("48:notes".to_string()));
+    }
+
+    #[test]
+    fn resolves_self_only_one_to_one_as_self_thread() {
+        let chats = vec![chat(
+            "19:self_self@unq.gbl.spaces",
+            ChatKind::OneToOne,
+            Some("Current User"),
+            vec![self_member("Current User", "me@example.com")],
+        )];
+
+        assert_eq!(
+            find_self_thread_id(&chats),
+            Some("19:self_self@unq.gbl.spaces".to_string())
+        );
     }
 }
