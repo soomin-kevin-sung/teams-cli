@@ -62,6 +62,25 @@ async fn main() {
             )
             .await
         }
+        Command::Post {
+            dry_run,
+            stdin,
+            confirm_thread_id,
+            reply_chain_id,
+            channel,
+            message,
+        } => {
+            commands::post::run(
+                &channel,
+                message.as_deref(),
+                stdin,
+                confirm_thread_id.as_deref(),
+                reply_chain_id.as_deref(),
+                dry_run,
+                cli.json,
+            )
+            .await
+        }
         Command::Alias { cmd } => match cmd {
             AliasCommand::List => commands::alias::list(cli.json).await,
             AliasCommand::Set { name, thread_id } => {

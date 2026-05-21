@@ -44,6 +44,18 @@ pub async fn resolve_send_target(
     lookup_thread_id(api, paths, target).await
 }
 
+pub async fn resolve_post_target(
+    api: &ApiClient,
+    paths: &AppPaths,
+    target: &str,
+) -> Result<TargetResolution, CliError> {
+    if let Some(resolution) = resolve_local_target(paths, target)? {
+        validate_channel_resolution(target, &resolution)?;
+        return Ok(resolution);
+    }
+    lookup_thread_id_for_kind(api, paths, target, is_channel_chat, "channel").await
+}
+
 pub fn resolve_local_target(
     paths: &AppPaths,
     target: &str,
@@ -58,6 +70,16 @@ async fn lookup_thread_id(
     api: &ApiClient,
     paths: &AppPaths,
     target: &str,
+) -> Result<TargetResolution, CliError> {
+    lookup_thread_id_for_kind(api, paths, target, is_sendable_chat, "chat").await
+}
+
+async fn lookup_thread_id_for_kind(
+    api: &ApiClient,
+    paths: &AppPaths,
+    target: &str,
+    allowed: fn(&&chats::ChatSummary) -> bool,
+    target_kind: &str,
 ) -> Result<TargetResolution, CliError> {
     let owner = chat_cache::owner_from_api(api).await;
     let cached = chat_cache::load_for_owner(paths, &owner)?;
@@ -78,20 +100,24 @@ async fn lookup_thread_id(
         ));
     }
 
-    if let Some(resolution) = resolve_from_chats(target, &cached, TargetSource::CachedChats)? {
+    if let Some(resolution) =
+        resolve_from_chats_with_filter(target, &cached, TargetSource::CachedChats, allowed)?
+    {
         return Ok(resolution);
     }
 
     let fresh = chats::list_chats(api, 100).await?;
     chat_cache::write(paths, &owner, &fresh)?;
-    if let Some(resolution) = resolve_from_chats(target, &fresh, TargetSource::FreshChats)? {
+    if let Some(resolution) =
+        resolve_from_chats_with_filter(target, &fresh, TargetSource::FreshChats, allowed)?
+    {
         return Ok(resolution);
     }
 
     Err(CliError::structured(
         "target_not_found",
         format!(
-            "could not resolve chat target '{target}'. Pass a raw 19:... thread id, define an alias, or run `teams list-chats -n 100 --json` to inspect available chats."
+            "could not resolve {target_kind} target '{target}'. Pass a raw 19:... thread id, define an alias, or run `teams list-chats -n 100 --json` to inspect available targets."
         ),
         json!({
             "target": target,
@@ -114,16 +140,26 @@ fn thread_resolution(target: &str, thread_id: String) -> TargetResolution {
     }
 }
 
+#[cfg(test)]
 fn resolve_from_chats(
     target: &str,
     chats: &[chats::ChatSummary],
     source: TargetSource,
 ) -> Result<Option<TargetResolution>, CliError> {
+    resolve_from_chats_with_filter(target, chats, source, is_sendable_chat)
+}
+
+fn resolve_from_chats_with_filter(
+    target: &str,
+    chats: &[chats::ChatSummary],
+    source: TargetSource,
+    allowed: fn(&&chats::ChatSummary) -> bool,
+) -> Result<Option<TargetResolution>, CliError> {
     let all_matches = matching_chats(target, chats);
     let matches = all_matches
         .iter()
         .copied()
-        .filter(is_sendable_chat)
+        .filter(allowed)
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
@@ -180,6 +216,28 @@ fn is_sendable_chat(chat: &&chats::ChatSummary) -> bool {
         chat.kind,
         chats::ChatKind::OneToOne | chats::ChatKind::Group
     )
+}
+
+fn is_channel_chat(chat: &&chats::ChatSummary) -> bool {
+    matches!(chat.kind, chats::ChatKind::Channel)
+}
+
+fn validate_channel_resolution(
+    target: &str,
+    resolution: &TargetResolution,
+) -> Result<TargetResolution, CliError> {
+    if resolution.thread_id.contains("@thread.tacv2") {
+        return Ok(resolution.clone());
+    }
+    Err(CliError::structured(
+        "unsupported_target",
+        format!("post target '{target}' is not a channel thread id"),
+        json!({
+            "target": target,
+            "thread_id": resolution.thread_id
+        }),
+        2,
+    ))
 }
 
 fn is_self_target(target: &str) -> bool {

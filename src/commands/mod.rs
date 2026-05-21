@@ -3,6 +3,7 @@ pub mod cache;
 pub mod list_chats;
 pub mod login;
 pub mod logout;
+pub mod post;
 pub mod read;
 pub mod resolve;
 pub mod search_chats;
