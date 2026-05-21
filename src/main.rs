@@ -8,11 +8,14 @@ mod util;
 
 use clap::Parser;
 use cli::{Cli, Command};
+use error::CliError;
+use serde_json::json;
+use std::ffi::OsStr;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli_or_exit();
     init_tracing(cli.verbose);
 
     let result = match cli.cmd {
@@ -41,6 +44,38 @@ async fn main() {
         }
         std::process::exit(error.to_exit_code());
     }
+}
+
+fn parse_cli_or_exit() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.exit_code() == 0 => {
+            print!("{error}");
+            std::process::exit(0);
+        }
+        Err(error) if wants_json() => {
+            let exit_code = error.exit_code();
+            let cli_error = CliError::structured(
+                "cli_parse_error",
+                "invalid command line",
+                json!({
+                    "clap_kind": format!("{:?}", error.kind())
+                }),
+                exit_code,
+            );
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&cli_error.to_json())
+                    .unwrap_or_else(|_| cli_error.to_string())
+            );
+            std::process::exit(exit_code);
+        }
+        Err(error) => error.exit(),
+    }
+}
+
+fn wants_json() -> bool {
+    std::env::args_os().any(|arg| arg == OsStr::new("--json"))
 }
 
 fn init_tracing(verbose: u8) {

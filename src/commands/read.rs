@@ -5,13 +5,16 @@ use crate::config::AppPaths;
 use crate::error::CliError;
 use serde_json::json;
 
+const MAX_READ_LIMIT: usize = 100;
+
 pub async fn run(target: &str, limit: usize, json_output: bool) -> Result<(), CliError> {
+    let effective_limit = limit.min(MAX_READ_LIMIT);
     let paths = AppPaths::resolve()?;
     let http = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
     let session = Session::load(&http).await?;
     let api = ApiClient::new(session)?;
     let resolution = target::resolve_send_target(&api, &paths, target).await?;
-    let messages = messages::read_messages(&api, &resolution.thread_id, limit).await?;
+    let messages = messages::read_messages(&api, &resolution.thread_id, effective_limit).await?;
 
     if json_output {
         println!(
@@ -24,6 +27,8 @@ pub async fn run(target: &str, limit: usize, json_output: bool) -> Result<(), Cl
                 "chat": resolution.thread_id,
                 "chat_summary": resolution.chat,
                 "count": messages.len(),
+                "limit": effective_limit,
+                "requested_limit": limit,
                 "messages": messages
             }))?
         );
@@ -44,7 +49,12 @@ pub async fn run(target: &str, limit: usize, json_output: bool) -> Result<(), Cl
                 .map(|time| time.to_rfc3339())
                 .unwrap_or_else(|| "-".to_string());
             let text = message.content_text.as_deref().unwrap_or("");
-            println!("[{created_at}] {sender}: {text}");
+            println!(
+                "[{}] {}: {}",
+                sanitize_terminal(&created_at),
+                sanitize_terminal(sender),
+                sanitize_terminal(text)
+            );
         }
     }
 
@@ -58,4 +68,24 @@ fn target_label(resolution: &TargetResolution) -> String {
         .and_then(|chat| chat.title.as_deref())
         .unwrap_or("(raw thread id)");
     format!("{title} {}", resolution.thread_id)
+}
+
+fn sanitize_terminal(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_sanitizer_removes_control_sequences() {
+        assert_eq!(sanitize_terminal("hi\u{1b}[31m\rthere"), "hi [31m there");
+    }
 }

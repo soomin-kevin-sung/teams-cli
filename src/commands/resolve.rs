@@ -7,11 +7,19 @@ use serde_json::json;
 
 pub async fn run(target: &str, json_output: bool) -> Result<(), CliError> {
     let paths = AppPaths::resolve()?;
+    if let Some(resolution) = target::resolve_local_target(&paths, target)? {
+        print_resolution(&resolution, json_output)?;
+        return Ok(());
+    }
+
     let http = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
     let session = Session::load(&http).await?;
     let api = ApiClient::new(session)?;
     let resolution = target::resolve_send_target(&api, &paths, target).await?;
+    print_resolution(&resolution, json_output)
+}
 
+fn print_resolution(resolution: &TargetResolution, json_output: bool) -> Result<(), CliError> {
     if json_output {
         println!(
             "{}",
@@ -21,11 +29,12 @@ pub async fn run(target: &str, json_output: bool) -> Result<(), CliError> {
                 "target": resolution.target,
                 "thread_id": resolution.thread_id,
                 "source": resolution.source,
-                "chat": resolution.chat
+                "chat": resolution.thread_id,
+                "chat_summary": resolution.chat
             }))?
         );
     } else {
-        println!("Resolved: {}", target_label(&resolution));
+        println!("Resolved: {}", target_label(resolution));
         println!("Source  : {:?}", resolution.source);
     }
     Ok(())

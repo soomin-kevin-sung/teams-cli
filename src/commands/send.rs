@@ -12,6 +12,13 @@ pub async fn run(
     json_output: bool,
 ) -> Result<(), CliError> {
     let paths = AppPaths::resolve()?;
+    if dry_run {
+        if let Some(resolution) = target::resolve_local_target(&paths, chat)? {
+            print_dry_run(chat, message, &resolution, json_output)?;
+            return Ok(());
+        }
+    }
+
     let http = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
     let session = Session::load(&http).await?;
     let api = ApiClient::new(session)?;
@@ -67,8 +74,9 @@ fn print_dry_run(
                 "thread_id": resolution.thread_id,
                 "chat_summary": resolution.chat,
                 "message": {
-                    "text": message,
-                    "content_type": "text"
+                    "content_type": "RichText/Html",
+                    "text_length": message.chars().count(),
+                    "html_escaped": true
                 }
             }))?
         );

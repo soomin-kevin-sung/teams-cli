@@ -25,7 +25,7 @@ pub enum AuthStyle {
 pub enum ApiError {
     #[error("auth: {0}")]
     Auth(#[from] AuthError),
-    #[error("http {status}: {body}")]
+    #[error("http {status}")]
     Http { status: u16, body: String },
     #[error("rate limited after retries")]
     RateLimited,
@@ -33,7 +33,7 @@ pub enum ApiError {
     Decode(#[from] serde_json::Error),
     #[error("transport: {0}")]
     Transport(#[from] reqwest::Error),
-    #[error("not found: {0}")]
+    #[error("not found")]
     NotFound(String),
 }
 

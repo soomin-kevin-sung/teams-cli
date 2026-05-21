@@ -47,7 +47,7 @@ Some Teams send responses return `201 Created` without a server message id; in t
 
 ## Agent-Friendly Interface
 
-Use `--json` for machine-readable success output and structured errors. Success JSON is written to stdout. Error JSON is written to stderr and includes a stable `error.code`, human-readable `error.message`, numeric `error.exit_code`, and command-specific `error.details`.
+Use `--json` for machine-readable success output and structured errors, including command-line parse errors. Success JSON is written to stdout. Error JSON is written to stderr and includes a stable `error.code`, human-readable `error.message`, numeric `error.exit_code`, and command-specific `error.details`. HTTP response bodies from Teams are not printed in errors.
 
 ```powershell
 teams --json resolve user@example.com
@@ -57,6 +57,7 @@ teams --json send user@example.com "hello from agent"
 ```
 
 `resolve`, `read`, and `send --dry-run` use the same target resolution as `send`, so an agent can verify the exact `thread_id`, read recent context, and then send. Ambiguous targets fail with `error.code = "ambiguous_target"` and include up to 10 candidate chats in `error.details.candidates`.
+Raw thread ids, aliases, and cached targets can be resolved without a logged-in session. Invalid `aliases.toml` fails closed with `error.code = "alias_config_error"` instead of falling back to live name matching. `send --dry-run --json` reports message length and payload type without echoing the full message text.
 
 `teams login --tenant <tenant-id-or-domain>` overrides the default `organizations` tenant. If your tenant blocks device-code flow, login returns a Conditional Access error; browser-cookie/MSAL extraction fallback is not implemented in this MVP.
 
@@ -92,5 +93,5 @@ teams send util "hello"
 - Channel posts, file uploads, reactions, and creating new 1:1 threads are not implemented.
 - Group and channel roster expansion is not implemented; `members` is currently most complete for 1:1 chats.
 - `send` can resolve only existing chats returned by `list-chats`; it does not create a new 1:1 conversation for an email that has no existing chat. Self notes require Teams to expose the `48:notes` thread.
-- `read` uses undocumented Teams message endpoints and normalizes common response shapes; some rich cards, reactions, and specialized attachments may be simplified.
+- `read` uses undocumented Teams message endpoints and normalizes common response shapes; some rich cards, reactions, and specialized attachments may be simplified. `read -n` values above 100 are clamped to 100.
 - Logout deletes local state only; already-issued tokens expire naturally.

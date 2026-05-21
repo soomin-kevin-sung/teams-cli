@@ -38,35 +38,39 @@ pub async fn resolve_send_target(
     paths: &AppPaths,
     target: &str,
 ) -> Result<TargetResolution, CliError> {
-    match resolve(target, &paths.aliases) {
-        ChatRef::ThreadId(thread_id) => Ok(TargetResolution {
-            target: target.to_string(),
-            thread_id,
-            source: if target.starts_with("19:") || target.starts_with("48:") {
-                TargetSource::RawThreadId
-            } else {
-                TargetSource::Alias
-            },
-            chat: None,
-        }),
-        ChatRef::Lookup(value) => lookup_thread_id(api, paths, &value).await,
+    if let Some(resolution) = resolve_local_target(paths, target)? {
+        return Ok(resolution);
+    }
+    lookup_fresh_thread_id(api, paths, target).await
+}
+
+pub fn resolve_local_target(
+    paths: &AppPaths,
+    target: &str,
+) -> Result<Option<TargetResolution>, CliError> {
+    match resolve(target, &paths.aliases)? {
+        ChatRef::ThreadId(thread_id) => Ok(Some(thread_resolution(target, thread_id))),
+        ChatRef::Lookup(value) => resolve_cached_lookup(paths, &value),
     }
 }
 
-async fn lookup_thread_id(
+async fn lookup_fresh_thread_id(
     api: &ApiClient,
     paths: &AppPaths,
     target: &str,
 ) -> Result<TargetResolution, CliError> {
     if is_self_target(target) {
-        return lookup_self_thread_id(api, paths, target).await;
-    }
-
-    let cached = load_cached_chats(paths)?;
-    match resolve_from_chats(target, &cached, TargetSource::CachedChats) {
-        Ok(Some(resolution)) => return Ok(resolution),
-        Ok(None) => {}
-        Err(error) => tracing::debug!("cached chat target lookup failed: {error}"),
+        let fresh = chats::list_chats(api, 100).await?;
+        cache_chats(paths, &fresh)?;
+        if let Some(chat) = find_self_chat(&fresh) {
+            return Ok(target_resolution(target, chat, TargetSource::SelfTarget));
+        }
+        return Err(CliError::structured(
+            "self_chat_not_found",
+            "could not resolve self chat. Run `teams list-chats -n 100 --json` and look for the Teams self notes thread, or pass `48:notes` directly if your tenant exposes it.",
+            json!({ "target": target, "expected_thread_id": "48:notes" }),
+            2,
+        ));
     }
 
     let fresh = chats::list_chats(api, 100).await?;
@@ -89,28 +93,29 @@ async fn lookup_thread_id(
     ))
 }
 
-async fn lookup_self_thread_id(
-    api: &ApiClient,
+fn resolve_cached_lookup(
     paths: &AppPaths,
     target: &str,
-) -> Result<TargetResolution, CliError> {
+) -> Result<Option<TargetResolution>, CliError> {
     let cached = load_cached_chats(paths)?;
-    if let Some(chat) = find_self_chat(&cached) {
-        return Ok(target_resolution(target, chat, TargetSource::SelfTarget));
+    if is_self_target(target) {
+        return Ok(find_self_chat(&cached)
+            .map(|chat| target_resolution(target, chat, TargetSource::SelfTarget)));
     }
+    resolve_from_chats(target, &cached, TargetSource::CachedChats)
+}
 
-    let fresh = chats::list_chats(api, 100).await?;
-    cache_chats(paths, &fresh)?;
-    if let Some(chat) = find_self_chat(&fresh) {
-        return Ok(target_resolution(target, chat, TargetSource::SelfTarget));
+fn thread_resolution(target: &str, thread_id: String) -> TargetResolution {
+    TargetResolution {
+        target: target.to_string(),
+        thread_id,
+        source: if target.starts_with("19:") || target.starts_with("48:") {
+            TargetSource::RawThreadId
+        } else {
+            TargetSource::Alias
+        },
+        chat: None,
     }
-
-    Err(CliError::structured(
-        "self_chat_not_found",
-        "could not resolve self chat. Run `teams list-chats -n 100 --json` and look for the Teams self notes thread, or pass `48:notes` directly if your tenant exposes it.",
-        json!({ "target": target, "expected_thread_id": "48:notes" }),
-        2,
-    ))
 }
 
 fn load_cached_chats(paths: &AppPaths) -> Result<Vec<chats::ChatSummary>, CliError> {

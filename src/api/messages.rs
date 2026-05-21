@@ -166,12 +166,16 @@ pub async fn read_messages(
     ];
 
     let mut last_error = None;
+    let mut empty_success = None;
     for (url, style) in candidates {
         match api.get_json::<serde_json::Value>(&url, style).await {
             Ok(value) => {
                 let mut messages = normalize_messages(&value);
                 messages.truncate(limit);
-                return Ok(messages);
+                if !messages.is_empty() {
+                    return Ok(messages);
+                }
+                empty_success = Some(messages);
             }
             Err(ApiError::Http { status, body }) if matches!(status, 400 | 401 | 403 | 404) => {
                 last_error = Some(ApiError::Http { status, body });
@@ -179,6 +183,10 @@ pub async fn read_messages(
             Err(ApiError::NotFound(body)) => last_error = Some(ApiError::NotFound(body)),
             Err(error) => return Err(error),
         }
+    }
+
+    if let Some(messages) = empty_success {
+        return Ok(messages);
     }
 
     Err(last_error
@@ -226,13 +234,15 @@ fn candidate_message_arrays(value: &serde_json::Value) -> Vec<&Vec<serde_json::V
 }
 
 fn normalize_message(value: &serde_json::Value) -> Option<ChatMessage> {
-    let content_html = string_at(value, &["content", "body", "html", "message"])
-        .or_else(|| value.pointer("/body/content").and_then(as_string));
+    let content_html = sanitize_text_field(
+        string_at(value, &["content", "body", "html", "message"])
+            .or_else(|| value.pointer("/body/content").and_then(as_string)),
+    );
     let content_text = content_html
         .as_deref()
         .map(html_to_text)
         .filter(|text| !text.is_empty())
-        .or_else(|| string_at(value, &["text", "plainText", "preview"]));
+        .or_else(|| sanitize_text_field(string_at(value, &["text", "plainText", "preview"])));
     let message = ChatMessage {
         id: string_at(value, &["id", "messageId", "serverMessageId"]),
         client_message_id: string_at(value, &["clientmessageid", "clientMessageId"]),
@@ -265,11 +275,18 @@ fn normalize_message(value: &serde_json::Value) -> Option<ChatMessage> {
 
 fn sender_from_message(value: &serde_json::Value) -> Option<MessageSender> {
     let from = value.get("from");
+    let from_user_id = value.pointer("/from/user/id").and_then(as_string);
     let mut sender = MessageSender {
         mri: string_at(value, &["from", "sender", "user"])
             .filter(|text| text.starts_with("8:"))
             .or_else(|| from.and_then(|from| string_at(from, &["mri", "id", "userId"])))
-            .or_else(|| value.pointer("/from/user/id").and_then(as_string)),
+            .filter(|text| text.starts_with("8:"))
+            .or_else(|| {
+                from_user_id
+                    .as_deref()
+                    .filter(|id| id.starts_with("8:"))
+                    .map(ToString::to_string)
+            }),
         object_id: from
             .and_then(|from| {
                 string_at(
@@ -277,17 +294,26 @@ fn sender_from_message(value: &serde_json::Value) -> Option<MessageSender> {
                     &["objectId", "aadObjectId", "aadId", "oid", "userObjectId"],
                 )
             })
-            .or_else(|| value.pointer("/from/user/objectId").and_then(as_string)),
-        display_name: string_at(value, &["imdisplayname", "imDisplayName", "displayName"])
-            .or_else(|| from.and_then(|from| string_at(from, &["displayName", "name"])))
-            .or_else(|| value.pointer("/from/user/displayName").and_then(as_string)),
-        user_principal_name: from
-            .and_then(|from| string_at(from, &["userPrincipalName", "upn", "email", "mail"]))
+            .or_else(|| value.pointer("/from/user/objectId").and_then(as_string))
             .or_else(|| {
-                value
-                    .pointer("/from/user/userPrincipalName")
-                    .and_then(as_string)
+                from_user_id
+                    .as_deref()
+                    .filter(|id| looks_like_guid(id))
+                    .map(ToString::to_string)
             }),
+        display_name: sanitize_sender_field(
+            string_at(value, &["imdisplayname", "imDisplayName", "displayName"])
+                .or_else(|| from.and_then(|from| string_at(from, &["displayName", "name"])))
+                .or_else(|| value.pointer("/from/user/displayName").and_then(as_string)),
+        ),
+        user_principal_name: sanitize_sender_field(
+            from.and_then(|from| string_at(from, &["userPrincipalName", "upn", "email", "mail"]))
+                .or_else(|| {
+                    value
+                        .pointer("/from/user/userPrincipalName")
+                        .and_then(as_string)
+                }),
+        ),
     };
     if sender.object_id.is_none() {
         sender.object_id = oid_from_mri(sender.mri.as_deref());
@@ -385,27 +411,61 @@ fn decode_entities(input: &str) -> String {
             output.push(ch);
             continue;
         }
+
+        let probe = chars.clone();
         let mut entity = String::new();
-        while let Some(&next) = chars.peek() {
-            chars.next();
+        let mut found_semicolon = false;
+        for next in probe {
             if next == ';' {
+                found_semicolon = true;
                 break;
             }
-            if entity.len() > 12 {
+            if next.is_whitespace() || entity.len() >= 12 {
                 break;
             }
             entity.push(next);
         }
-        match decode_entity(&entity) {
-            Some(decoded) => output.push(decoded),
-            None => {
-                output.push('&');
-                output.push_str(&entity);
-                output.push(';');
-            }
+
+        if !found_semicolon {
+            output.push('&');
+            continue;
+        }
+
+        for _ in 0..=entity.chars().count() {
+            chars.next();
+        }
+
+        if let Some(decoded) = decode_entity(&entity) {
+            output.push(decoded);
+        } else {
+            output.push('&');
+            output.push_str(&entity);
+            output.push(';');
         }
     }
     output
+}
+
+fn sanitize_text_field(value: Option<String>) -> Option<String> {
+    value.map(|text| {
+        text.chars()
+            .map(|ch| {
+                if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+                    ' '
+                } else {
+                    ch
+                }
+            })
+            .collect()
+    })
+}
+
+fn sanitize_sender_field(value: Option<String>) -> Option<String> {
+    value.map(|text| {
+        text.chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .collect()
+    })
 }
 
 fn decode_entity(entity: &str) -> Option<char> {
@@ -541,7 +601,7 @@ mod tests {
                     "createdDateTime": "2026-05-21T01:02:03Z",
                     "from": {
                         "user": {
-                            "id": "8:orgid:22222222-2222-2222-2222-222222222222",
+                            "id": "22222222-2222-2222-2222-222222222222",
                             "displayName": "Blair",
                             "userPrincipalName": "blair@example.com"
                         }
@@ -564,6 +624,52 @@ mod tests {
                 .as_ref()
                 .and_then(|sender| sender.user_principal_name.as_deref()),
             Some("blair@example.com")
+        );
+        assert_eq!(
+            messages[0]
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.object_id.as_deref()),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
+        assert_eq!(
+            messages[0]
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.mri.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn entity_decoder_preserves_plain_ampersands() {
+        assert_eq!(
+            html_to_text("<p>R&D and A & B &bogus;</p>"),
+            "R&D and A & B &bogus;"
+        );
+    }
+
+    #[test]
+    fn normalizer_sanitizes_control_characters() {
+        let value = serde_json::json!({
+            "messages": [
+                {
+                    "id": "msg3",
+                    "imdisplayname": "A\u{001b}[31m",
+                    "plainText": "hello\u{0008}there"
+                }
+            ]
+        });
+
+        let messages = normalize_messages(&value);
+
+        assert_eq!(messages[0].content_text.as_deref(), Some("hello there"));
+        assert_eq!(
+            messages[0]
+                .sender
+                .as_ref()
+                .and_then(|sender| sender.display_name.as_deref()),
+            Some("A [31m")
         );
     }
 }

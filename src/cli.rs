@@ -9,7 +9,11 @@ pub struct Cli {
     #[arg(short, long, action = ArgAction::Count, global = true)]
     pub verbose: u8,
 
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Emit machine-readable JSON for supported commands and errors"
+    )]
     pub json: bool,
 
     #[command(subcommand)]
@@ -46,7 +50,7 @@ pub enum Command {
     Read {
         /// Chat thread id, alias, self target (me/self/notes), exact email, exact display name, or exact chat title.
         target: String,
-        /// Limit number of messages.
+        /// Limit number of messages. Values above 100 are clamped.
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
     },
