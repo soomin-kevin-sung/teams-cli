@@ -20,11 +20,24 @@ async fn main() {
         Command::Logout => commands::logout::run().await,
         Command::Whoami => commands::whoami::run(cli.json).await,
         Command::ListChats { limit } => commands::list_chats::run(limit, cli.json).await,
-        Command::Send { chat, message } => commands::send::run(&chat, &message, cli.json).await,
+        Command::Resolve { target } => commands::resolve::run(&target, cli.json).await,
+        Command::Send {
+            dry_run,
+            chat,
+            message,
+        } => commands::send::run(&chat, &message, dry_run, cli.json).await,
     };
 
     if let Err(error) = result {
-        eprintln!("{error}");
+        if cli.json {
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&error.to_json())
+                    .unwrap_or_else(|_| error.to_string())
+            );
+        } else {
+            eprintln!("{error}");
+        }
         std::process::exit(error.to_exit_code());
     }
 }

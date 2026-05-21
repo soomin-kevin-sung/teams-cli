@@ -37,8 +37,16 @@ pub enum Command {
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: usize,
     },
+    /// Resolve a send target without sending a message.
+    Resolve {
+        /// Chat thread id, alias, self target (me/self/notes), exact email, exact display name, or exact chat title.
+        target: String,
+    },
     /// Send a text message to an existing 1:1, group, or self notes chat.
     Send {
+        /// Resolve and print the target without sending.
+        #[arg(long)]
+        dry_run: bool,
         /// Chat thread id, alias, self target (me/self/notes), exact email, exact display name, or exact chat title.
         chat: String,
         /// Plaintext message body.

@@ -8,6 +8,7 @@ Unofficial Microsoft Teams CLI for personal automation. It uses undocumented Tea
 - `teams logout` — removes local tokens and state. No server-side revocation is performed.
 - `teams whoami` — prints cached identity and token expiry information.
 - `teams list-chats [-n N] [--json]` — lists recent group chats using Teams web APIs.
+- `teams resolve <target> [--json]` — resolves a send target without sending a message.
 - `teams send <target> <message>` — sends plaintext as HTML to an existing 1:1, group, or self notes chat. The target can be a raw thread id, alias, `me`/`self`/`notes`, exact email, exact display name, or exact chat title.
 
 ## Build
@@ -29,6 +30,8 @@ teams login
 teams whoami
 teams list-chats -n 20
 teams list-chats -n 20 --json
+teams resolve user@example.com --json
+teams send --dry-run user@example.com "hello from CLI" --json
 teams send "19:example-thread-id@thread.v2" "hello from CLI"
 teams send user@example.com "hello from CLI"
 teams send "Project room" "hello from CLI"
@@ -39,6 +42,18 @@ teams logout
 `list-chats --json` includes `members` as structured user metadata when Teams exposes it. For 1:1 chats, the CLI resolves both the signed-in user and the peer with `mri`, `object_id`, `display_name`, and `user_principal_name` when available.
 When Teams exposes the self notes conversation, `send` resolves `me`, `self`, `myself`, `notes`, `self notes`, `saved messages`, or `chat with self` to the `48:notes` thread.
 Some Teams send responses return `201 Created` without a server message id; in that case the CLI still treats the send as successful and prints the generated `client_message_id`.
+
+## Agent-Friendly Interface
+
+Use `--json` for machine-readable success output and structured errors. Success JSON is written to stdout. Error JSON is written to stderr and includes a stable `error.code`, human-readable `error.message`, numeric `error.exit_code`, and command-specific `error.details`.
+
+```powershell
+teams --json resolve user@example.com
+teams --json send --dry-run user@example.com "hello from agent"
+teams --json send user@example.com "hello from agent"
+```
+
+`resolve` and `send --dry-run` use the same target resolution as `send`, so an agent can verify the exact `thread_id` before sending. Ambiguous targets fail with `error.code = "ambiguous_target"` and include up to 10 candidate chats in `error.details.candidates`.
 
 `teams login --tenant <tenant-id-or-domain>` overrides the default `organizations` tenant. If your tenant blocks device-code flow, login returns a Conditional Access error; browser-cookie/MSAL extraction fallback is not implemented in this MVP.
 
