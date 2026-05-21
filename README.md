@@ -8,7 +8,7 @@ Unofficial Microsoft Teams CLI for personal automation. It uses undocumented Tea
 - `teams logout` — removes local tokens and state. No server-side revocation is performed.
 - `teams whoami` — prints cached identity and token expiry information.
 - `teams list-chats [-n N] [--json]` — lists recent group chats using Teams web APIs.
-- `teams send <chat-id-or-alias> <message>` — sends plaintext as HTML to an existing 1:1 or group chat thread.
+- `teams send <target> <message>` — sends plaintext as HTML to an existing 1:1 or group chat. The target can be a raw thread id, alias, exact email, exact display name, or exact chat title.
 
 ## Build
 
@@ -30,6 +30,8 @@ teams whoami
 teams list-chats -n 20
 teams list-chats -n 20 --json
 teams send "19:example-thread-id@thread.v2" "hello from CLI"
+teams send user@example.com "hello from CLI"
+teams send "Project room" "hello from CLI"
 teams logout
 ```
 
@@ -59,6 +61,8 @@ Then send with:
 teams send util "hello"
 ```
 
+`send` resolves non-id targets from the cached `list-chats` result first, then refreshes the latest 100 chats if needed. If a display name or title matches multiple chats, the CLI prints candidates and refuses to send until you use a raw thread id or alias.
+
 ## Known Limitations
 
 - Microsoft Teams unofficial APIs are unsupported and can change without notice.
@@ -66,5 +70,5 @@ teams send util "hello"
 - Device-code flow may be blocked by Conditional Access.
 - Channel posts, file uploads, reactions, and creating new 1:1 threads are not implemented.
 - Group and channel roster expansion is not implemented; `members` is currently most complete for 1:1 chats.
-- `send` accepts raw `19:...`/`48:...` thread IDs or aliases only; UPN/display-name lookup is planned for a later version.
+- `send` can resolve only existing chats returned by `list-chats`; it does not create a new 1:1 conversation for an email that has no existing chat.
 - Logout deletes local state only; already-issued tokens expire naturally.

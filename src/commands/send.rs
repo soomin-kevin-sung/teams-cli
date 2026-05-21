@@ -1,35 +1,248 @@
-use crate::api::{client::ApiClient, messages};
+use crate::api::{chats, client::ApiClient, messages};
 use crate::auth::{Session, USER_AGENT};
 use crate::config::AppPaths;
 use crate::error::CliError;
 use crate::util::chat_ref::{resolve, ChatRef};
 use serde_json::json;
+use std::fs;
 
 pub async fn run(chat: &str, message: &str, json_output: bool) -> Result<(), CliError> {
     let paths = AppPaths::resolve()?;
-    let thread_id = match resolve(chat, &paths.aliases) {
-        ChatRef::ThreadId(thread_id) => thread_id,
-        ChatRef::UnresolvableUpn(upn) => {
-            return Err(CliError::Other(format!(
-                "Resolving '{upn}' requires a 1:1 thread lookup; run `teams list-chats` and pass the 19:…@unq.gbl.spaces id directly. UPN resolution is planned for v0.2."
-            )));
-        }
-        ChatRef::Unknown(value) => {
-            return Err(CliError::Other(format!(
-                "unknown chat reference '{value}'. Pass a raw 19:… thread id or define an alias in {}",
-                paths.aliases.display()
-            )));
-        }
-    };
-
     let http = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
     let session = Session::load(&http).await?;
     let api = ApiClient::new(session)?;
+    let thread_id = resolve_send_target(&api, &paths, chat).await?;
     let id = messages::send_message(&api, &thread_id, message).await?;
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&json!({ "id": id }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "id": id, "chat": thread_id }))?
+        );
     } else {
         println!("Sent: {id}");
     }
     Ok(())
+}
+
+async fn resolve_send_target(
+    api: &ApiClient,
+    paths: &AppPaths,
+    target: &str,
+) -> Result<String, CliError> {
+    match resolve(target, &paths.aliases) {
+        ChatRef::ThreadId(thread_id) => Ok(thread_id),
+        ChatRef::Lookup(value) => lookup_thread_id(api, paths, &value).await,
+    }
+}
+
+async fn lookup_thread_id(
+    api: &ApiClient,
+    paths: &AppPaths,
+    target: &str,
+) -> Result<String, CliError> {
+    let mut cached = load_cached_chats(paths)?;
+    if let Some(thread_id) = unique_match(target, &cached)? {
+        return Ok(thread_id);
+    }
+
+    let fresh = chats::list_chats(api, 100).await?;
+    cache_chats(paths, &fresh)?;
+    cached = fresh;
+    if let Some(thread_id) = unique_match(target, &cached)? {
+        return Ok(thread_id);
+    }
+
+    Err(CliError::Other(format!(
+        "could not resolve chat target '{target}'. Pass a raw 19:… thread id, define an alias in {}, or run `teams list-chats -n 100 --json` to inspect available chats.",
+        paths.aliases.display()
+    )))
+}
+
+fn load_cached_chats(paths: &AppPaths) -> Result<Vec<chats::ChatSummary>, CliError> {
+    let path = paths.cache_dir.join("chats.json");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+}
+
+fn cache_chats(paths: &AppPaths, chats: &[chats::ChatSummary]) -> Result<(), CliError> {
+    fs::create_dir_all(&paths.cache_dir)?;
+    fs::write(
+        paths.cache_dir.join("chats.json"),
+        serde_json::to_string_pretty(chats)?,
+    )?;
+    Ok(())
+}
+
+fn unique_match(target: &str, chats: &[chats::ChatSummary]) -> Result<Option<String>, CliError> {
+    let mut all_matches = chats
+        .iter()
+        .filter(|chat| chat_matches_target(chat, target))
+        .collect::<Vec<_>>();
+    all_matches.dedup_by(|left, right| left.id == right.id);
+
+    let matches = all_matches
+        .iter()
+        .copied()
+        .filter(is_sendable_chat)
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] => Ok(None),
+        [chat] => Ok(Some(chat.id.clone())),
+        _ => Err(CliError::Other(ambiguous_target_message(target, &matches))),
+    }
+    .and_then(|result| {
+        if result.is_none() && !all_matches.is_empty() {
+            Err(CliError::Other(format!(
+                "chat target '{target}' matched only channel/system entries. Sending to channels is not implemented yet; use an existing 1:1 or group chat."
+            )))
+        } else {
+            Ok(result)
+        }
+    })
+}
+
+fn is_sendable_chat(chat: &&chats::ChatSummary) -> bool {
+    matches!(
+        chat.kind,
+        chats::ChatKind::OneToOne | chats::ChatKind::Group
+    )
+}
+
+fn chat_matches_target(chat: &chats::ChatSummary, target: &str) -> bool {
+    let target_norm = normalize(target);
+    if target_norm.is_empty() {
+        return false;
+    }
+
+    if target.contains('@') {
+        return chat.members.iter().any(|member| {
+            member
+                .user_principal_name
+                .as_deref()
+                .is_some_and(|upn| normalize(upn) == target_norm)
+        });
+    }
+
+    chat.title
+        .as_deref()
+        .is_some_and(|title| normalize(title) == target_norm)
+        || chat.members.iter().any(|member| {
+            member
+                .display_name
+                .as_deref()
+                .is_some_and(|name| normalize(name) == target_norm)
+                || member
+                    .user_principal_name
+                    .as_deref()
+                    .is_some_and(|upn| normalize(upn) == target_norm)
+        })
+}
+
+fn normalize(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn ambiguous_target_message(target: &str, matches: &[&chats::ChatSummary]) -> String {
+    let candidates = matches
+        .iter()
+        .take(10)
+        .map(|chat| {
+            format!(
+                "- {} ({}) {}",
+                chat.title.as_deref().unwrap_or("(untitled)"),
+                chat.kind,
+                chat.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "chat target '{target}' matched multiple chats. Use a raw thread id or define an alias.\n{candidates}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::chats::{ChatKind, ChatMember, ChatSummary};
+
+    fn chat(
+        id: &str,
+        kind: ChatKind,
+        title: Option<&str>,
+        members: Vec<ChatMember>,
+    ) -> ChatSummary {
+        ChatSummary {
+            id: id.to_string(),
+            kind,
+            title: title.map(ToString::to_string),
+            last_message_at: None,
+            last_message_preview: None,
+            members,
+        }
+    }
+
+    fn member(display_name: &str, upn: &str) -> ChatMember {
+        ChatMember {
+            display_name: Some(display_name.to_string()),
+            user_principal_name: Some(upn.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn matches_one_to_one_by_email() {
+        let chats = vec![chat(
+            "19:peer_self@unq.gbl.spaces",
+            ChatKind::OneToOne,
+            Some("Peer"),
+            vec![member("Peer", "peer@example.com")],
+        )];
+
+        assert_eq!(
+            unique_match("peer@example.com", &chats).expect("match"),
+            Some("19:peer_self@unq.gbl.spaces".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_display_names() {
+        let chats = vec![
+            chat(
+                "19:a_self@unq.gbl.spaces",
+                ChatKind::OneToOne,
+                Some("Alex"),
+                vec![member("Alex", "a@example.com")],
+            ),
+            chat(
+                "19:b_self@unq.gbl.spaces",
+                ChatKind::OneToOne,
+                Some("Alex"),
+                vec![member("Alex", "b@example.com")],
+            ),
+        ];
+
+        assert!(unique_match("Alex", &chats)
+            .expect_err("ambiguous")
+            .to_string()
+            .contains("matched multiple chats"));
+    }
+
+    #[test]
+    fn refuses_channel_title_matches() {
+        let chats = vec![chat(
+            "19:channel@thread.tacv2",
+            ChatKind::Channel,
+            Some("Announcements"),
+            Vec::new(),
+        )];
+
+        assert!(unique_match("Announcements", &chats)
+            .expect_err("channel")
+            .to_string()
+            .contains("channels is not implemented"));
+    }
 }

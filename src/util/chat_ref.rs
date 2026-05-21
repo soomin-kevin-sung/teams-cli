@@ -6,8 +6,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatRef {
     ThreadId(String),
-    UnresolvableUpn(String),
-    Unknown(String),
+    Lookup(String),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -23,10 +22,7 @@ pub fn resolve(input: &str, aliases_path: &Path) -> ChatRef {
     if let Some(thread_id) = alias_lookup(input, aliases_path) {
         return ChatRef::ThreadId(thread_id);
     }
-    if input.contains('@') {
-        return ChatRef::UnresolvableUpn(input.to_string());
-    }
-    ChatRef::Unknown(input.to_string())
+    ChatRef::Lookup(input.to_string())
 }
 
 fn alias_lookup(alias: &str, aliases_path: &Path) -> Option<String> {
@@ -48,10 +44,10 @@ mod tests {
     }
 
     #[test]
-    fn flags_upn_as_deferred() {
+    fn treats_upn_as_lookup_target() {
         assert_eq!(
             resolve("user@example.com", Path::new("missing.toml")),
-            ChatRef::UnresolvableUpn("user@example.com".to_string())
+            ChatRef::Lookup("user@example.com".to_string())
         );
     }
 

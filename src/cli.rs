@@ -37,9 +37,9 @@ pub enum Command {
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: usize,
     },
-    /// Send a text message to an existing 1:1 or group chat thread.
+    /// Send a text message to an existing 1:1 or group chat.
     Send {
-        /// Chat thread id or alias from aliases.toml.
+        /// Chat thread id, alias, exact email, exact display name, or exact chat title.
         chat: String,
         /// Plaintext message body.
         message: String,
