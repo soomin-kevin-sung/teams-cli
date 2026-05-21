@@ -1,7 +1,6 @@
 use super::client::{ApiClient, ApiError, AuthStyle};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Debug, Serialize)]
 struct SendMessageRequest<'a> {
@@ -127,77 +126,6 @@ pub async fn send_message(
         .await?;
     Ok(SentMessage {
         id: response.server_message_id(),
-        client_message_id,
-    })
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphQlResponse<T> {
-    data: Option<T>,
-    #[serde(default)]
-    errors: Vec<GraphQlError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphQlError {
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SendMessageMutationData {
-    send_message: Option<SendMessageMutationResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SendMessageMutationResult {
-    id: Option<String>,
-}
-
-pub async fn post_channel_message(
-    api: &ApiClient,
-    thread_id: &str,
-    body_plain: &str,
-    reply_chain_id: Option<&str>,
-) -> Result<SentMessage, ApiError> {
-    let url = format!("{}/graphql", api.csa_base().await);
-    let client_message_id = chrono::Utc::now().timestamp_millis().to_string();
-    let mut message = json!({
-        "content": format!("<p>{}</p>", html_escape(body_plain)),
-        "clientMessageId": client_message_id,
-        "messageType": "RichText/Html",
-        "importance": "Standard"
-    });
-    if let Some(reply_chain_id) = reply_chain_id {
-        message["replyChainId"] = json!(reply_chain_id);
-    }
-    let body = json!({
-        "operationName": "sendMessage",
-        "query": "mutation sendMessage($convId: ID!, $message: SendMessageInput, $action: SendMessageAction) { sendMessage(convId: $convId, message: $message, action: $action) { id } }",
-        "variables": {
-            "convId": thread_id,
-            "message": message,
-            "action": "Create"
-        }
-    });
-    let response = api
-        .post_json::<GraphQlResponse<SendMessageMutationData>, _>(
-            &url,
-            AuthStyle::BearerAadPlusSkype,
-            &body,
-        )
-        .await?;
-    if let Some(error) = response.errors.first() {
-        return Err(ApiError::Http {
-            status: 200,
-            body: error.message.clone(),
-        });
-    }
-    Ok(SentMessage {
-        id: response
-            .data
-            .and_then(|data| data.send_message)
-            .and_then(|message| message.id),
         client_message_id,
     })
 }

@@ -87,25 +87,6 @@ pub enum Command {
         /// Plaintext message body. Optional when --stdin is used.
         message: Option<String>,
     },
-    /// Post a text message to an existing Teams channel.
-    Post {
-        /// Resolve and print the channel target without posting.
-        #[arg(long)]
-        dry_run: bool,
-        /// Read plaintext post body from stdin instead of MESSAGE.
-        #[arg(long)]
-        stdin: bool,
-        /// Refuse to post unless the resolved thread id exactly matches this value.
-        #[arg(long)]
-        confirm_thread_id: Option<String>,
-        /// Reply to an existing channel post instead of creating a new root post.
-        #[arg(long)]
-        reply_chain_id: Option<String>,
-        /// Channel thread id, alias, or exact channel title from the chat cache/list.
-        channel: String,
-        /// Plaintext post body. Optional when --stdin is used.
-        message: Option<String>,
-    },
     /// Manage local aliases.
     Alias {
         #[command(subcommand)]
