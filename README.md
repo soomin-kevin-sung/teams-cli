@@ -38,6 +38,7 @@ teams logout
 
 `list-chats --json` includes `members` as structured user metadata when Teams exposes it. For 1:1 chats, the CLI resolves both the signed-in user and the peer with `mri`, `object_id`, `display_name`, and `user_principal_name` when available.
 When Teams exposes the self notes conversation, `send` resolves `me`, `self`, `myself`, `notes`, `self notes`, `saved messages`, or `chat with self` to the `48:notes` thread.
+Some Teams send responses return `201 Created` without a server message id; in that case the CLI still treats the send as successful and prints the generated `client_message_id`.
 
 `teams login --tenant <tenant-id-or-domain>` overrides the default `organizations` tenant. If your tenant blocks device-code flow, login returns a Conditional Access error; browser-cookie/MSAL extraction fallback is not implemented in this MVP.
 

@@ -12,14 +12,23 @@ pub async fn run(chat: &str, message: &str, json_output: bool) -> Result<(), Cli
     let session = Session::load(&http).await?;
     let api = ApiClient::new(session)?;
     let thread_id = resolve_send_target(&api, &paths, chat).await?;
-    let id = messages::send_message(&api, &thread_id, message).await?;
+    let sent = messages::send_message(&api, &thread_id, message).await?;
     if json_output {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({ "id": id, "chat": thread_id }))?
+            serde_json::to_string_pretty(&json!({
+                "id": sent.id,
+                "client_message_id": sent.client_message_id,
+                "chat": thread_id
+            }))?
         );
-    } else {
+    } else if let Some(id) = sent.id {
         println!("Sent: {id}");
+    } else {
+        println!(
+            "Sent: {} (server message id was not returned)",
+            sent.client_message_id
+        );
     }
     Ok(())
 }

@@ -24,13 +24,33 @@ struct SendMessageResponse {
     id: Option<String>,
     #[serde(default, rename = "Id")]
     id_pascal: Option<String>,
+    #[serde(default, rename = "messageId")]
+    message_id: Option<String>,
+    #[serde(default, rename = "MessageId")]
+    message_id_pascal: Option<String>,
+}
+
+impl SendMessageResponse {
+    fn server_message_id(self) -> Option<String> {
+        self.id
+            .or(self.id_pascal)
+            .or(self.message_id)
+            .or(self.message_id_pascal)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SentMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub client_message_id: String,
 }
 
 pub async fn send_message(
     api: &ApiClient,
     thread_id: &str,
     body_plain: &str,
-) -> Result<String, ApiError> {
+) -> Result<SentMessage, ApiError> {
     let display_name = api.display_name().await;
     let encoded_thread_id = percent_encode_path_segment(thread_id);
     let url = format!(
@@ -38,11 +58,12 @@ pub async fn send_message(
         api.chat_service().await,
         encoded_thread_id
     );
+    let client_message_id = chrono::Utc::now().timestamp_millis().to_string();
     let body = SendMessageRequest {
         content: format!("<p>{}</p>", html_escape(body_plain)),
         messagetype: "RichText/Html",
         contenttype: "text",
-        clientmessageid: chrono::Utc::now().timestamp_millis().to_string(),
+        clientmessageid: client_message_id.clone(),
         imdisplayname: &display_name,
         properties: SendMessageProperties {
             importance: "",
@@ -53,13 +74,10 @@ pub async fn send_message(
     let response = api
         .post_json::<SendMessageResponse, _>(&url, AuthStyle::SkypeHeader, &body)
         .await?;
-    response
-        .id
-        .or(response.id_pascal)
-        .ok_or_else(|| ApiError::Http {
-            status: 201,
-            body: "send response did not include a message id".to_string(),
-        })
+    Ok(SentMessage {
+        id: response.server_message_id(),
+        client_message_id,
+    })
 }
 
 pub fn html_escape(input: &str) -> String {
@@ -90,5 +108,27 @@ mod tests {
             percent_encode_path_segment("19:abc@thread.v2"),
             "19%3Aabc%40thread.v2"
         );
+    }
+
+    #[test]
+    fn extracts_known_message_id_fields() {
+        for (field, expected) in [
+            ("id", "a"),
+            ("Id", "b"),
+            ("messageId", "c"),
+            ("MessageId", "d"),
+        ] {
+            let json = format!(r#"{{ "{field}": "{expected}" }}"#);
+            let response: SendMessageResponse = serde_json::from_str(&json).expect("response");
+
+            assert_eq!(response.server_message_id().as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn missing_server_message_id_is_allowed() {
+        let response: SendMessageResponse = serde_json::from_str("{}").expect("response");
+
+        assert_eq!(response.server_message_id(), None);
     }
 }
