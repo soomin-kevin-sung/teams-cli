@@ -40,15 +40,16 @@ async fn lookup_thread_id(
     paths: &AppPaths,
     target: &str,
 ) -> Result<String, CliError> {
-    let mut cached = load_cached_chats(paths)?;
-    if let Some(thread_id) = unique_match(target, &cached)? {
-        return Ok(thread_id);
+    let cached = load_cached_chats(paths)?;
+    match unique_match(target, &cached) {
+        Ok(Some(thread_id)) => return Ok(thread_id),
+        Ok(None) => {}
+        Err(error) => tracing::debug!("cached chat target lookup failed: {error}"),
     }
 
     let fresh = chats::list_chats(api, 100).await?;
     cache_chats(paths, &fresh)?;
-    cached = fresh;
-    if let Some(thread_id) = unique_match(target, &cached)? {
+    if let Some(thread_id) = unique_match(target, &fresh)? {
         return Ok(thread_id);
     }
 
@@ -119,10 +120,11 @@ fn chat_matches_target(chat: &chats::ChatSummary, target: &str) -> bool {
 
     if target.contains('@') {
         return chat.members.iter().any(|member| {
-            member
-                .user_principal_name
-                .as_deref()
-                .is_some_and(|upn| normalize(upn) == target_norm)
+            !is_self_member(member)
+                && member
+                    .user_principal_name
+                    .as_deref()
+                    .is_some_and(|upn| normalize(upn) == target_norm)
         });
     }
 
@@ -130,15 +132,23 @@ fn chat_matches_target(chat: &chats::ChatSummary, target: &str) -> bool {
         .as_deref()
         .is_some_and(|title| normalize(title) == target_norm)
         || chat.members.iter().any(|member| {
-            member
-                .display_name
-                .as_deref()
-                .is_some_and(|name| normalize(name) == target_norm)
-                || member
-                    .user_principal_name
+            !is_self_member(member)
+                && (member
+                    .display_name
                     .as_deref()
-                    .is_some_and(|upn| normalize(upn) == target_norm)
+                    .is_some_and(|name| normalize(name) == target_norm)
+                    || member
+                        .user_principal_name
+                        .as_deref()
+                        .is_some_and(|upn| normalize(upn) == target_norm))
         })
+}
+
+fn is_self_member(member: &chats::ChatMember) -> bool {
+    member
+        .role
+        .as_deref()
+        .is_some_and(|role| role.eq_ignore_ascii_case("self"))
 }
 
 fn normalize(value: &str) -> String {
@@ -163,7 +173,6 @@ fn ambiguous_target_message(target: &str, matches: &[&chats::ChatSummary]) -> St
         "chat target '{target}' matched multiple chats. Use a raw thread id or define an alias.\n{candidates}"
     )
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +202,13 @@ mod tests {
         }
     }
 
+    fn self_member(display_name: &str, upn: &str) -> ChatMember {
+        ChatMember {
+            role: Some("Self".to_string()),
+            ..member(display_name, upn)
+        }
+    }
+
     #[test]
     fn matches_one_to_one_by_email() {
         let chats = vec![chat(
@@ -206,6 +222,33 @@ mod tests {
             unique_match("peer@example.com", &chats).expect("match"),
             Some("19:peer_self@unq.gbl.spaces".to_string())
         );
+    }
+
+    #[test]
+    fn ignores_signed_in_user_member_when_matching() {
+        let chats = vec![
+            chat(
+                "19:a_self@unq.gbl.spaces",
+                ChatKind::OneToOne,
+                Some("Peer A"),
+                vec![
+                    self_member("Current User", "me@example.com"),
+                    member("Peer A", "a@example.com"),
+                ],
+            ),
+            chat(
+                "19:b_self@unq.gbl.spaces",
+                ChatKind::OneToOne,
+                Some("Peer B"),
+                vec![
+                    self_member("Current User", "me@example.com"),
+                    member("Peer B", "b@example.com"),
+                ],
+            ),
+        ];
+
+        assert_eq!(unique_match("Current User", &chats).expect("match"), None);
+        assert_eq!(unique_match("me@example.com", &chats).expect("match"), None);
     }
 
     #[test]

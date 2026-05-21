@@ -167,13 +167,30 @@ async fn enrich_user_metadata(api: &ApiClient, chats: &mut [ChatSummary]) {
         }
         upsert_member(&mut chat.members, peer.clone());
 
-        if chat.title.as_deref().map_or(true, str::is_empty) {
+        if chat.title.as_deref().map_or(true, str::is_empty)
+            || chat_title_matches_member(&chat.title, &own_member)
+        {
             chat.title = peer
                 .display_name
                 .clone()
                 .or(peer.user_principal_name.clone());
         }
     }
+}
+
+fn chat_title_matches_member(title: &Option<String>, member: &ChatMember) -> bool {
+    let Some(title) = title.as_deref() else {
+        return false;
+    };
+    let title = title.trim();
+    member
+        .display_name
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(title))
+        || member
+            .user_principal_name
+            .as_deref()
+            .is_some_and(|upn| upn.eq_ignore_ascii_case(title))
 }
 
 fn one_to_one_peer_refs(chats: &[ChatSummary], own_oid: &str) -> Vec<(String, String)> {
@@ -392,8 +409,7 @@ fn normalize_chat(
     )?;
     let title = string_at(value, &["topic", "displayName", "title", "name"])
         .or_else(|| value.pointer("/threadProperties/topic").and_then(as_string))
-        .or_else(|| value.pointer("/conversation/topic").and_then(as_string))
-        .or_else(|| one_to_one_sender_title(&id, value));
+        .or_else(|| value.pointer("/conversation/topic").and_then(as_string));
     let members = extract_members(value, user_index);
     let kind = infer_kind(&id, value, &members);
     let last_message_preview = string_at(
@@ -549,23 +565,6 @@ fn infer_kind(id: &str, value: &serde_json::Value, members: &[ChatMember]) -> Ch
         _ if members.len() == 2 => ChatKind::OneToOne,
         _ => ChatKind::Unknown,
     }
-}
-
-fn one_to_one_sender_title(id: &str, value: &serde_json::Value) -> Option<String> {
-    let (peer_oid, _) = one_to_one_id_parts(id)?;
-    let from = value.pointer("/lastMessage/from").and_then(as_string)?;
-    if !from.contains(&peer_oid) {
-        return None;
-    }
-    value
-        .pointer("/lastMessage/fromDisplayNameInToken")
-        .and_then(as_string)
-        .or_else(|| {
-            value
-                .pointer("/lastMessage/imdisplayname")
-                .and_then(as_string)
-        })
-        .filter(|name| !name.trim().is_empty())
 }
 
 fn one_to_one_peer_oid(id: &str, own_oid: &str) -> Option<String> {
@@ -880,5 +879,27 @@ mod tests {
             one_to_one_peer_oid("19:peer_self@unq.gbl.spaces", "self").as_deref(),
             Some("peer")
         );
+    }
+
+    #[test]
+    fn detects_self_title() {
+        let member = ChatMember {
+            display_name: Some("Current User".to_string()),
+            user_principal_name: Some("me@example.com".to_string()),
+            ..Default::default()
+        };
+
+        assert!(chat_title_matches_member(
+            &Some("current user".to_string()),
+            &member
+        ));
+        assert!(chat_title_matches_member(
+            &Some("ME@example.com".to_string()),
+            &member
+        ));
+        assert!(!chat_title_matches_member(
+            &Some("Other User".to_string()),
+            &member
+        ));
     }
 }
