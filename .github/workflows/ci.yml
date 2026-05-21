@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,3 +58,66 @@ jobs:
 
       - name: Check MSRV
         run: cargo check --locked
+
+  release:
+    name: Release
+    runs-on: windows-latest
+    needs:
+      - rust
+      - msrv
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compute release version
+        id: version
+        shell: pwsh
+        run: |
+          git fetch --tags --force
+          $latest = git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | Select-Object -First 1
+          if ($latest) {
+            $parts = $latest.TrimStart('v').Split('.')
+            $major = [int]$parts[0]
+            $minor = [int]$parts[1]
+            $patch = [int]$parts[2] + 1
+            $version = "$major.$minor.$patch"
+          } else {
+            $manifest = Get-Content -Raw Cargo.toml
+            if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+              throw 'Could not read package version from Cargo.toml'
+            }
+            $version = $Matches[1]
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          "asset=teams-v$version-windows-x86_64.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\teams.exe "dist\${{ steps.version.outputs.asset }}"
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag "${{ steps.version.outputs.tag }}" $env:GITHUB_SHA
+          git push origin "${{ steps.version.outputs.tag }}"
+          gh release create "${{ steps.version.outputs.tag }}" `
+            "dist\${{ steps.version.outputs.asset }}" `
+            --title "teams-cli ${{ steps.version.outputs.tag }}" `
+            --notes "Automated release from CI for commit $env:GITHUB_SHA."
