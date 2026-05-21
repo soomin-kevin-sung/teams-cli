@@ -167,7 +167,7 @@ async fn enrich_user_metadata(api: &ApiClient, chats: &mut [ChatSummary]) {
         }
         upsert_member(&mut chat.members, peer.clone());
 
-        if chat.title.as_deref().map_or(true, str::is_empty)
+        if chat.title.as_deref().is_none_or(str::is_empty)
             || chat_title_matches_member(&chat.title, &own_member)
         {
             chat.title = peer
