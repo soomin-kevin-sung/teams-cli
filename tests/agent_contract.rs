@@ -71,6 +71,200 @@ fn dry_run_does_not_echo_message_body() {
 }
 
 #[test]
+fn send_markdown_dry_run_reports_format_without_echoing_body() {
+    let (mut cmd, _dir) = isolated_command();
+    let output = cmd
+        .args([
+            "--json",
+            "send",
+            "--dry-run",
+            "--format",
+            "markdown",
+            "19:example-thread-id@thread.v2",
+            "**top secret body**",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout.clone()).expect("utf8");
+    assert!(!stdout.contains("top secret body"));
+    let value = json_stdout(&output);
+    assert_eq!(value["message"]["format"], "markdown");
+    assert_eq!(value["message"]["markdown_converted"], true);
+    assert_eq!(value["message"]["html_escaped"], true);
+    assert!(value["message"]["html_length"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn channel_post_dry_run_does_not_require_login() {
+    let (mut cmd, _dir) = isolated_command();
+    let output = cmd
+        .args([
+            "--json",
+            "post",
+            "channel",
+            "--dry-run",
+            "19:example-channel@thread.tacv2",
+            "channel secret body",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout.clone()).expect("utf8");
+    assert!(!stdout.contains("channel secret body"));
+    let value = json_stdout(&output);
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["posted"], false);
+    assert_eq!(value["thread_id"], "19:example-channel@thread.tacv2");
+    assert_eq!(value["message"]["text_length"], 19);
+}
+
+#[test]
+fn channel_post_dry_run_can_resolve_without_message() {
+    let (mut cmd, _dir) = isolated_command();
+    let output = cmd
+        .args([
+            "--json",
+            "post",
+            "channel",
+            "--dry-run",
+            "19:example-channel@thread.tacv2",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let value = json_stdout(&output);
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["resolved"], true);
+    assert_eq!(value["posted"], false);
+    assert_eq!(
+        value["confirm_thread_id"],
+        "19:example-channel@thread.tacv2"
+    );
+    assert_eq!(value["thread_id"], "19:example-channel@thread.tacv2");
+    assert!(value["message"].is_null());
+}
+
+#[test]
+fn channel_post_html_dry_run_reports_format_without_echoing_body() {
+    let (mut cmd, _dir) = isolated_command();
+    let output = cmd
+        .args([
+            "--json",
+            "post",
+            "channel",
+            "--dry-run",
+            "--format",
+            "html",
+            "19:example-channel@thread.tacv2",
+            "<strong>channel secret body</strong>",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout.clone()).expect("utf8");
+    assert!(!stdout.contains("channel secret body"));
+    let value = json_stdout(&output);
+    assert_eq!(value["message"]["format"], "html");
+    assert_eq!(value["message"]["markdown_converted"], false);
+    assert_eq!(value["message"]["html_escaped"], false);
+}
+
+#[test]
+fn channel_post_card_dry_run_redacts_card_body() {
+    let (mut cmd, dir) = isolated_command();
+    let card_path = dir.path().join("card.json");
+    fs::write(
+        &card_path,
+        r#"{
+  "type": "AdaptiveCard",
+  "version": "1.2",
+  "body": [
+    { "type": "TextBlock", "text": "card secret body" }
+  ]
+}"#,
+    )
+    .expect("card");
+
+    let output = cmd
+        .args(["--json", "post", "channel", "--dry-run", "--card-json"])
+        .arg(&card_path)
+        .arg("19:example-channel@thread.tacv2")
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout.clone()).expect("utf8");
+    assert!(!stdout.contains("card secret body"));
+    let value = json_stdout(&output);
+    assert_eq!(value["ok"], true);
+    assert_eq!(
+        value["card"]["content_type"],
+        "application/vnd.microsoft.card.adaptive"
+    );
+    assert_eq!(value["card"]["version"], "1.2");
+    assert_eq!(value["card"]["body_elements"], 1);
+    assert!(value["message"].is_null());
+}
+
+#[test]
+fn channel_post_card_actual_is_disabled_by_default() {
+    let (mut cmd, dir) = isolated_command();
+    let card_path = dir.path().join("card.json");
+    fs::write(
+        &card_path,
+        r#"{
+  "type": "AdaptiveCard",
+  "version": "1.2",
+  "body": []
+}"#,
+    )
+    .expect("card");
+
+    let output = cmd
+        .args(["--json", "post", "channel", "--card-json"])
+        .arg(&card_path)
+        .arg("19:example-channel@thread.tacv2")
+        .output()
+        .expect("run");
+
+    assert_eq!(output.status.code(), Some(2));
+    let value = json_stderr(&output);
+    assert_eq!(value["error"]["code"], "unsupported_card_post");
+    assert_eq!(
+        value["error"]["details"]["thread_id"],
+        "19:example-channel@thread.tacv2"
+    );
+}
+
+#[test]
+fn channel_post_rejects_non_channel_raw_thread() {
+    let (mut cmd, _dir) = isolated_command();
+    let output = cmd
+        .args([
+            "--json",
+            "post",
+            "channel",
+            "--dry-run",
+            "19:example-chat@thread.v2",
+            "hello",
+        ])
+        .output()
+        .expect("run");
+
+    assert_eq!(output.status.code(), Some(2));
+    let value = json_stderr(&output);
+    assert_eq!(value["error"]["code"], "invalid_channel_target");
+}
+
+#[test]
 fn dry_run_enforces_confirm_thread_id() {
     let (mut cmd, _dir) = isolated_command();
     let output = cmd

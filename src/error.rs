@@ -88,7 +88,10 @@ impl CliError {
             Self::Auth(AuthError::Aad { code, msg }) => {
                 json!({ "aad_code": code, "aad_message": msg })
             }
-            Self::Api(ApiError::Http { status, .. }) => json!({ "status": status }),
+            Self::Api(ApiError::Http { status, body }) => json!({
+                "status": status,
+                "body_preview": body.chars().take(500).collect::<String>()
+            }),
             _ => json!({}),
         }
     }

@@ -7,7 +7,7 @@ mod error;
 mod util;
 
 use clap::Parser;
-use cli::{AliasCommand, CacheCommand, Cli, Command};
+use cli::{AliasCommand, CacheCommand, Cli, Command, DebugCommand, PostCommand};
 use error::CliError;
 use serde_json::json;
 use std::ffi::OsStr;
@@ -48,6 +48,7 @@ async fn main() {
         Command::Send {
             dry_run,
             stdin,
+            format,
             confirm_thread_id,
             chat,
             message,
@@ -56,12 +57,36 @@ async fn main() {
                 &chat,
                 message.as_deref(),
                 stdin,
+                &format,
                 confirm_thread_id.as_deref(),
                 dry_run,
                 cli.json,
             )
             .await
         }
+        Command::Post { cmd } => match cmd {
+            PostCommand::Channel {
+                dry_run,
+                stdin,
+                format,
+                card_json,
+                confirm_thread_id,
+                channel,
+                message,
+            } => {
+                commands::post::channel(commands::post::ChannelOptions {
+                    channel: &channel,
+                    message: message.as_deref(),
+                    read_stdin: stdin,
+                    format: &format,
+                    card_json: card_json.as_deref(),
+                    confirm_thread_id: confirm_thread_id.as_deref(),
+                    dry_run,
+                    json_output: cli.json,
+                })
+                .await
+            }
+        },
         Command::Alias { cmd } => match cmd {
             AliasCommand::List => commands::alias::list(cli.json).await,
             AliasCommand::Set { name, thread_id } => {
@@ -73,6 +98,15 @@ async fn main() {
             CacheCommand::Info => commands::cache::info(cli.json).await,
             CacheCommand::Refresh { limit } => commands::cache::refresh(limit, cli.json).await,
             CacheCommand::Clear => commands::cache::clear(cli.json).await,
+        },
+        Command::Debug { cmd } => match cmd {
+            DebugCommand::RawChats { limit } => commands::debug::raw_chats(limit, cli.json).await,
+            DebugCommand::RawMessages { thread_id, limit } => {
+                commands::debug::raw_messages(&thread_id, limit, cli.json).await
+            }
+            DebugCommand::SendHtml { target, html } => {
+                commands::debug::send_html(&target, &html, cli.json).await
+            }
         },
     };
 

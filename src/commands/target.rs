@@ -44,6 +44,28 @@ pub async fn resolve_send_target(
     lookup_thread_id(api, paths, target).await
 }
 
+pub async fn resolve_channel_target(
+    api: &ApiClient,
+    paths: &AppPaths,
+    target: &str,
+) -> Result<TargetResolution, CliError> {
+    if let Some(resolution) = resolve_local_channel_target(paths, target)? {
+        return Ok(resolution);
+    }
+    lookup_channel_thread_id(api, paths, target).await
+}
+
+pub fn resolve_local_channel_target(
+    paths: &AppPaths,
+    target: &str,
+) -> Result<Option<TargetResolution>, CliError> {
+    let Some(resolution) = resolve_local_target(paths, target)? else {
+        return Ok(None);
+    };
+    validate_channel_resolution(target, &resolution)?;
+    Ok(Some(resolution))
+}
+
 pub fn resolve_local_target(
     paths: &AppPaths,
     target: &str,
@@ -101,6 +123,36 @@ async fn lookup_thread_id(
     ))
 }
 
+async fn lookup_channel_thread_id(
+    api: &ApiClient,
+    paths: &AppPaths,
+    target: &str,
+) -> Result<TargetResolution, CliError> {
+    let owner = chat_cache::owner_from_api(api).await;
+    let cached = chat_cache::load_for_owner(paths, &owner)?;
+    if let Some(resolution) = resolve_from_channels(target, &cached, TargetSource::CachedChats)? {
+        return Ok(resolution);
+    }
+
+    let fresh = chats::list_chats(api, 200).await?;
+    chat_cache::write(paths, &owner, &fresh)?;
+    if let Some(resolution) = resolve_from_channels(target, &fresh, TargetSource::FreshChats)? {
+        return Ok(resolution);
+    }
+
+    Err(CliError::structured(
+        "channel_target_not_found",
+        format!(
+            "could not resolve channel target '{target}'. Pass a raw 19:...@thread.tacv2 id, define an alias, or run `teams list-chats -n 200 --json` to inspect available channels."
+        ),
+        json!({
+            "target": target,
+            "alias_file": "aliases.toml"
+        }),
+        2,
+    ))
+}
+
 fn thread_resolution(target: &str, thread_id: String) -> TargetResolution {
     TargetResolution {
         target: target.to_string(),
@@ -129,6 +181,26 @@ fn resolve_from_chats(
     match matches.as_slice() {
         [] if all_matches.is_empty() => Ok(None),
         [] => Err(unsupported_target_error(target, &all_matches)),
+        [chat] => Ok(Some(target_resolution(target, chat, source))),
+        _ => Err(ambiguous_target_error(target, &matches)),
+    }
+}
+
+fn resolve_from_channels(
+    target: &str,
+    chats: &[chats::ChatSummary],
+    source: TargetSource,
+) -> Result<Option<TargetResolution>, CliError> {
+    let all_matches = matching_chats(target, chats);
+    let matches = all_matches
+        .iter()
+        .copied()
+        .filter(is_channel_chat)
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] if all_matches.is_empty() => Ok(None),
+        [] => Err(non_channel_target_error(target, &all_matches)),
         [chat] => Ok(Some(target_resolution(target, chat, source))),
         _ => Err(ambiguous_target_error(target, &matches)),
     }
@@ -180,6 +252,36 @@ fn is_sendable_chat(chat: &&chats::ChatSummary) -> bool {
         chat.kind,
         chats::ChatKind::OneToOne | chats::ChatKind::Group
     )
+}
+
+fn is_channel_chat(chat: &&chats::ChatSummary) -> bool {
+    matches!(chat.kind, chats::ChatKind::Channel)
+}
+
+fn validate_channel_resolution(
+    target: &str,
+    resolution: &TargetResolution,
+) -> Result<(), CliError> {
+    if is_channel_thread_id(&resolution.thread_id) {
+        Ok(())
+    } else {
+        Err(CliError::structured(
+            "invalid_channel_target",
+            format!(
+                "channel target '{target}' resolved to a non-channel thread id. Use a 19:...@thread.tacv2 channel id or a channel alias."
+            ),
+            json!({
+                "target": target,
+                "thread_id": resolution.thread_id,
+                "expected_suffix": "@thread.tacv2"
+            }),
+            2,
+        ))
+    }
+}
+
+fn is_channel_thread_id(thread_id: &str) -> bool {
+    thread_id.starts_with("19:") && thread_id.ends_with("@thread.tacv2")
 }
 
 fn is_self_target(target: &str) -> bool {
@@ -261,7 +363,21 @@ fn unsupported_target_error(target: &str, matches: &[&chats::ChatSummary]) -> Cl
     CliError::structured(
         "unsupported_target",
         format!(
-            "chat target '{target}' matched only channel/system entries. Sending to channels is not implemented yet; use an existing 1:1 or group chat."
+            "chat target '{target}' matched only channel/system entries. Use `teams post channel` for channel posts, or use an existing 1:1 or group chat."
+        ),
+        json!({
+            "target": target,
+            "candidates": candidates(matches)
+        }),
+        2,
+    )
+}
+
+fn non_channel_target_error(target: &str, matches: &[&chats::ChatSummary]) -> CliError {
+    CliError::structured(
+        "invalid_channel_target",
+        format!(
+            "channel target '{target}' matched only non-channel entries. Use a channel thread id, channel alias, or exact cached channel title."
         ),
         json!({
             "target": target,
@@ -421,8 +537,63 @@ mod tests {
 
         let error = resolve_from_chats("Announcements", &chats, TargetSource::CachedChats)
             .expect_err("channel");
-        assert!(error.to_string().contains("channels is not implemented"));
+        assert!(error.to_string().contains("teams post channel"));
         assert_eq!(error.code(), "unsupported_target");
+    }
+
+    #[test]
+    fn resolves_channel_title_for_channel_posts() {
+        let chats = vec![chat(
+            "19:channel@thread.tacv2",
+            ChatKind::Channel,
+            Some("Announcements"),
+            Vec::new(),
+        )];
+
+        assert_eq!(
+            resolve_from_channels("Announcements", &chats, TargetSource::CachedChats)
+                .expect("match")
+                .expect("some")
+                .thread_id,
+            "19:channel@thread.tacv2"
+        );
+    }
+
+    #[test]
+    fn rejects_non_channel_title_for_channel_posts() {
+        let chats = vec![chat(
+            "19:chat@thread.v2",
+            ChatKind::Group,
+            Some("Announcements"),
+            Vec::new(),
+        )];
+
+        let error = resolve_from_channels("Announcements", &chats, TargetSource::CachedChats)
+            .expect_err("not a channel");
+
+        assert_eq!(error.code(), "invalid_channel_target");
+    }
+
+    #[test]
+    fn validates_raw_channel_thread_ids() {
+        let resolution = TargetResolution {
+            target: "19:channel@thread.tacv2".into(),
+            thread_id: "19:channel@thread.tacv2".into(),
+            source: TargetSource::RawThreadId,
+            chat: None,
+        };
+        assert!(validate_channel_resolution("19:channel@thread.tacv2", &resolution).is_ok());
+
+        let resolution = TargetResolution {
+            thread_id: "19:chat@thread.v2".into(),
+            ..resolution
+        };
+        assert_eq!(
+            validate_channel_resolution("19:chat@thread.v2", &resolution)
+                .expect_err("not channel")
+                .code(),
+            "invalid_channel_target"
+        );
     }
 
     #[test]

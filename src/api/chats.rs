@@ -121,6 +121,76 @@ pub async fn list_chats(api: &ApiClient, limit: usize) -> Result<Vec<ChatSummary
     Err(last_error.unwrap_or_else(|| ApiError::NotFound("no chat endpoint succeeded".to_string())))
 }
 
+pub async fn list_chats_raw(api: &ApiClient, limit: usize) -> Result<serde_json::Value, ApiError> {
+    let endpoints = vec![
+        (
+            "https://teams.microsoft.com/api/csa/api/v1/teams/users/me/updates?isPrefetch=false&enableMembershipSummary=true".to_string(),
+            AuthStyle::BearerSkype,
+        ),
+        (
+            format!(
+                "{}/api/v1/teams/users/me/updates?isPrefetch=false&enableMembershipSummary=true",
+                api.csa_base().await
+            ),
+            AuthStyle::BearerSkype,
+        ),
+        (
+            format!(
+                "{}/api/v1/teams/users/me/groupchats?skipMeetingChats=true&pageSize={limit}",
+                api.csa_base().await
+            ),
+            AuthStyle::BearerSkype,
+        ),
+        (
+            format!(
+                "{}/api/v1/teams/users/ME/conversations?view=mychats&pageSize={limit}",
+                api.csa_base().await
+            ),
+            AuthStyle::BearerSkype,
+        ),
+        (
+            format!(
+                "{}/api/v2/users/ME/conversations?view=mychats&pageSize={limit}",
+                api.chat_svc_agg().await
+            ),
+            AuthStyle::SkypeHeader,
+        ),
+        (
+            format!(
+                "{}/v1/users/ME/conversations?view=mychats&pageSize={limit}",
+                api.chat_service().await
+            ),
+            AuthStyle::SkypeHeader,
+        ),
+    ];
+
+    let mut responses = Vec::new();
+    for (url, style) in endpoints {
+        match api.get_json::<serde_json::Value>(&url, style).await {
+            Ok(value) => responses.push(serde_json::json!({
+                "endpoint": url,
+                "ok": true,
+                "response": value
+            })),
+            Err(ApiError::Http { status, body }) => responses.push(serde_json::json!({
+                "endpoint": url,
+                "ok": false,
+                "status": status,
+                "body_preview": body.chars().take(500).collect::<String>()
+            })),
+            Err(ApiError::NotFound(body)) => responses.push(serde_json::json!({
+                "endpoint": url,
+                "ok": false,
+                "status": 404,
+                "body_preview": body.chars().take(500).collect::<String>()
+            })),
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(serde_json::json!({ "responses": responses }))
+}
+
 async fn enrich_user_metadata(api: &ApiClient, chats: &mut [ChatSummary]) {
     let own_oid = api.user_oid().await;
     let own_member = ChatMember {
@@ -379,10 +449,11 @@ fn json_shape(value: &serde_json::Value) -> String {
 
 fn normalize_chats(value: &serde_json::Value) -> Vec<ChatSummary> {
     let user_index = user_index(value);
+    let channel_title_index = channel_title_index(value);
     candidate_arrays(value)
         .into_iter()
         .flat_map(|array| array.iter())
-        .filter_map(|value| normalize_chat(value, &user_index))
+        .filter_map(|value| normalize_chat(value, &user_index, &channel_title_index))
         .collect()
 }
 
@@ -402,17 +473,37 @@ fn candidate_arrays(value: &serde_json::Value) -> Vec<&Vec<serde_json::Value>> {
 fn normalize_chat(
     value: &serde_json::Value,
     user_index: &BTreeMap<String, ChatMember>,
+    channel_title_index: &BTreeMap<String, String>,
 ) -> Option<ChatSummary> {
     let id = string_at(
         value,
         &["id", "threadId", "conversationId", "chatId", "mri"],
     )?;
-    let title = string_at(value, &["topic", "displayName", "title", "name"])
+    let mut title = string_at(value, &["topic", "displayName", "title", "name"])
         .or_else(|| value.pointer("/threadProperties/topic").and_then(as_string))
+        .or_else(|| {
+            value
+                .pointer("/threadProperties/spaceThreadTopic")
+                .and_then(as_string)
+        })
+        .or_else(|| {
+            value
+                .pointer("/threadProperties/channelName")
+                .and_then(as_string)
+        })
+        .or_else(|| {
+            value
+                .pointer("/threadProperties/displayName")
+                .and_then(as_string)
+        })
+        .or_else(|| value.pointer("/threadProperties/name").and_then(as_string))
         .or_else(|| value.pointer("/conversation/topic").and_then(as_string))
         .or_else(|| default_system_title(&id));
     let members = extract_members(value, user_index);
     let kind = infer_kind(&id, value, &members);
+    if matches!(kind, ChatKind::Channel) && title.as_deref().is_none_or(str::is_empty) {
+        title = channel_title_index.get(&id).cloned();
+    }
     let last_message_preview = string_at(
         value,
         &[
@@ -444,6 +535,55 @@ fn normalize_chat(
         last_message_preview,
         members,
     })
+}
+
+fn channel_title_index(value: &serde_json::Value) -> BTreeMap<String, String> {
+    let mut index = BTreeMap::new();
+    index_channel_titles(value, &mut index);
+    index
+}
+
+fn index_channel_titles(value: &serde_json::Value, index: &mut BTreeMap<String, String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(topics) = value.pointer("/threadProperties/topics") {
+                index_topics(topics, index);
+            }
+            for item in map.values() {
+                index_channel_titles(item, index);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                index_channel_titles(item, index);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn index_topics(topics: &serde_json::Value, index: &mut BTreeMap<String, String>) {
+    if let Some(text) = topics.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+            index_topics(&parsed, index);
+        }
+        return;
+    }
+
+    let Some(items) = topics.as_array() else {
+        return;
+    };
+    for item in items {
+        let Some(id) = string_at(item, &["id", "threadId", "conversationId"]) else {
+            continue;
+        };
+        let Some(name) = string_at(item, &["name", "title", "displayName", "topic"]) else {
+            continue;
+        };
+        if !name.trim().is_empty() {
+            index.insert(id, name);
+        }
+    }
 }
 
 fn default_system_title(id: &str) -> Option<String> {
@@ -914,9 +1054,53 @@ mod tests {
     #[test]
     fn labels_self_notes_system_chat() {
         let value = serde_json::json!({ "id": "48:notes" });
-        let chat = normalize_chat(&value, &BTreeMap::new()).expect("chat");
+        let chat = normalize_chat(&value, &BTreeMap::new(), &BTreeMap::new()).expect("chat");
 
         assert!(matches!(chat.kind, ChatKind::System));
         assert_eq!(chat.title.as_deref(), Some("Self notes"));
+    }
+
+    #[test]
+    fn uses_channel_space_thread_topic_as_title() {
+        let value = serde_json::json!({
+            "id": "19:private@thread.tacv2",
+            "threadProperties": {
+                "spaceThreadTopic": "Private Channel"
+            }
+        });
+
+        let chat = normalize_chat(&value, &BTreeMap::new(), &BTreeMap::new()).expect("chat");
+
+        assert!(matches!(chat.kind, ChatKind::Channel));
+        assert_eq!(chat.title.as_deref(), Some("Private Channel"));
+    }
+
+    #[test]
+    fn indexes_channel_titles_from_team_topics() {
+        let value = serde_json::json!({
+            "conversations": [
+                {
+                    "id": "19:team@thread.tacv2",
+                    "threadProperties": {
+                        "productThreadType": "TeamsTeam",
+                        "topics": "[{\"id\":\"19:channel@thread.tacv2\",\"name\":\"Packaging\"}]"
+                    }
+                },
+                {
+                    "id": "19:channel@thread.tacv2",
+                    "threadProperties": {
+                        "productThreadType": "TeamsStandardChannel"
+                    }
+                }
+            ]
+        });
+
+        let chats = normalize_chats(&value);
+        let channel = chats
+            .iter()
+            .find(|chat| chat.id == "19:channel@thread.tacv2")
+            .expect("channel");
+
+        assert_eq!(channel.title.as_deref(), Some("Packaging"));
     }
 }

@@ -7,7 +7,7 @@ This document describes the stable automation-facing behavior for `teams --json`
 - Success output is JSON on stdout.
 - Error output is JSON on stderr.
 - Human login device-code prompts are written to stderr so `teams --json login` can keep final success JSON on stdout after authentication completes.
-- Message bodies are not echoed by `send --dry-run --json`.
+- Message bodies are not echoed by `send --dry-run --json` or `post channel --dry-run --json`, including `--format html` and `--format markdown`.
 
 ## Error Envelope
 
@@ -45,12 +45,17 @@ Common error codes:
 | `alias_config_error` | `aliases.toml` could not be read or parsed; resolution fails closed |
 | `cache_corrupt` | `cache/chats.json` is invalid JSON |
 | `target_not_found` | No matching existing chat was found |
+| `channel_target_not_found` | No matching channel was found |
 | `ambiguous_target` | Multiple sendable chats matched |
 | `unsupported_target` | Only channel/system entries matched |
 | `self_chat_not_found` | Self notes could not be resolved |
+| `invalid_channel_target` | Channel post target resolved to a non-channel thread |
 | `target_confirmation_mismatch` | `--confirm-thread-id` did not match the resolved chat |
-| `confirmation_required` | `send --json` needs `--confirm-thread-id` for name/title targets |
+| `confirmation_required` | `send --json` or `post channel --json` needs `--confirm-thread-id` for name/title targets |
 | `invalid_arguments` | Command arguments are incompatible or incomplete |
+| `invalid_card_json` | `--card-json` could not be read or did not contain an Adaptive Card JSON object |
+| `card_too_large` | Adaptive Card JSON exceeded the CLI size cap |
+| `unsupported_card_post` | Actual `--card-json` posting is disabled because the current chat-service user client is not allowed to send `RichText/Media_Card` |
 | `message_too_large` | Message body exceeded the CLI size cap |
 | `invalid_alias` | Alias name failed validation |
 | `invalid_thread_id` | Alias value was not a raw Teams thread id |
@@ -111,6 +116,73 @@ Most commands include `ok: true` plus command-specific fields. Examples below om
 ```
 
 `id` may be `null` even when Teams returned HTTP 201. Treat `sent: true` plus `client_message_id` as the success signal.
+
+`send` and `post channel` accept `--format text`, `--format html`, or `--format markdown` for MESSAGE/stdin input. `text` is escaped and wrapped as Teams `RichText/Html`; `markdown` is converted to safe HTML; `html` is sent as explicit raw `RichText/Html`.
+
+### Channel Post Dry Run
+
+```json
+{
+  "ok": true,
+  "posted": false,
+  "dry_run": true,
+  "resolved": true,
+  "requires_confirmation": false,
+  "confirm_thread_id": "19:...@thread.tacv2",
+  "target": "19:...@thread.tacv2",
+  "channel": "19:...@thread.tacv2",
+  "thread_id": "19:...@thread.tacv2",
+  "message": null
+}
+```
+
+For exact channel-title resolution, `target` is the requested title and `requires_confirmation` is `true`. Use the returned `confirm_thread_id` unchanged on the actual `post channel --json` call.
+
+When a message is supplied to `post channel --dry-run`, the `message` object contains the same redacted shape as `send --dry-run`:
+
+```json
+{
+  "message": {
+    "content_type": "RichText/Html",
+    "format": "text",
+    "text_length": 17,
+    "html_length": 24,
+    "markdown_converted": false,
+    "html_escaped": true
+  }
+}
+```
+
+When `--card-json` is supplied, the card body is not echoed. The dry-run output includes a redacted summary:
+
+```json
+{
+  "card": {
+    "content_type": "application/vnd.microsoft.card.adaptive",
+    "json_bytes": 144,
+    "version": "1.2",
+    "body_elements": 2,
+    "actions": 1
+  }
+}
+```
+
+### Channel Post
+
+```json
+{
+  "ok": true,
+  "posted": true,
+  "dry_run": false,
+  "id": null,
+  "client_message_id": "1780000000000",
+  "channel": "19:...@thread.tacv2",
+  "thread_id": "19:...@thread.tacv2",
+  "channel_summary": {}
+}
+```
+
+`id` may be `null` even when Teams accepted the channel post. Treat `posted: true` plus `client_message_id` as the success signal.
 
 ### Read
 
@@ -209,5 +281,13 @@ Get-Content .\message.txt -Raw | teams --json send --stdin --confirm-thread-id $
 ```
 
 If resolution returns `ambiguous_target`, do not guess. Use a raw `thread_id` from the candidates or define an alias.
+
+For channel posts, prefer a raw channel thread id or a reviewed alias:
+
+```powershell
+$resolved = teams --json post channel --dry-run "Announcements" | ConvertFrom-Json
+teams --json post channel --confirm-thread-id $resolved.thread_id "Announcements" "final text"
+teams --json post channel --dry-run --card-json .\card.json "Announcements"
+```
 
 Attachment URLs in `read` output are redacted by default. Attachments expose `has_url: true` when Teams returned a URL-like field.

@@ -79,6 +79,9 @@ pub enum Command {
         /// Read plaintext message body from stdin instead of MESSAGE.
         #[arg(long)]
         stdin: bool,
+        /// Interpret MESSAGE/stdin as text, html, or markdown.
+        #[arg(long, default_value = "text", value_parser = ["text", "html", "markdown", "md"])]
+        format: String,
         /// Refuse to send unless the resolved thread id exactly matches this value.
         #[arg(long)]
         confirm_thread_id: Option<String>,
@@ -86,6 +89,11 @@ pub enum Command {
         chat: String,
         /// Plaintext message body. Optional when --stdin is used.
         message: Option<String>,
+    },
+    /// Post to Teams channels.
+    Post {
+        #[command(subcommand)]
+        cmd: PostCommand,
     },
     /// Manage local aliases.
     Alias {
@@ -96,6 +104,38 @@ pub enum Command {
     Cache {
         #[command(subcommand)]
         cmd: CacheCommand,
+    },
+    /// Hidden reverse-engineering helpers.
+    #[command(hide = true)]
+    Debug {
+        #[command(subcommand)]
+        cmd: DebugCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PostCommand {
+    /// Post a text message to a channel root thread.
+    Channel {
+        /// Resolve and print the target without posting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Read plaintext message body from stdin instead of MESSAGE.
+        #[arg(long)]
+        stdin: bool,
+        /// Interpret MESSAGE/stdin as text, html, or markdown.
+        #[arg(long, default_value = "text", value_parser = ["text", "html", "markdown", "md"])]
+        format: String,
+        /// Read an Adaptive Card JSON body from this file instead of MESSAGE.
+        #[arg(long)]
+        card_json: Option<String>,
+        /// Refuse to post unless the resolved thread id exactly matches this value.
+        #[arg(long)]
+        confirm_thread_id: Option<String>,
+        /// Channel thread id, alias, or exact cached channel title.
+        channel: String,
+        /// Plaintext message body. Optional for --dry-run or when --stdin/--card-json is used.
+        message: Option<String>,
     },
 }
 
@@ -129,4 +169,29 @@ pub enum CacheCommand {
     },
     /// Clear cached chats.
     Clear,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DebugCommand {
+    /// Print raw chat list endpoint responses.
+    RawChats {
+        /// Limit passed to chat-list endpoints. Values above 300 are clamped.
+        #[arg(short = 'n', long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Print the raw chat-service message response for a raw thread id.
+    RawMessages {
+        /// Raw Teams thread id.
+        thread_id: String,
+        /// Limit number of messages. Values above 100 are clamped.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Send raw RichText/Html content for reverse engineering.
+    SendHtml {
+        /// Chat target accepted by `send`.
+        target: String,
+        /// Raw HTML content to send.
+        html: String,
+    },
 }

@@ -1,11 +1,16 @@
 use super::client::{ApiClient, ApiError, AuthStyle};
+use crate::util::rich_text;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub const ADAPTIVE_CARD_CONTENT_TYPE: &str = "application/vnd.microsoft.card.adaptive";
+const SWIFT_THUMBNAIL_URL: &str = "https://urlp.asm.skype.com/v1/url/content?url=https://neu1-urlp.secure.skypeassets.com/static/card-128x128.png";
 
 #[derive(Debug, Serialize)]
 struct SendMessageRequest<'a> {
     content: String,
-    messagetype: &'static str,
+    messagetype: String,
     contenttype: &'static str,
     clientmessageid: String,
     imdisplayname: &'a str,
@@ -101,6 +106,19 @@ pub async fn send_message(
     thread_id: &str,
     body_plain: &str,
 ) -> Result<SentMessage, ApiError> {
+    send_html_message(
+        api,
+        thread_id,
+        &format!("<p>{}</p>", html_escape(body_plain)),
+    )
+    .await
+}
+
+pub async fn send_html_message(
+    api: &ApiClient,
+    thread_id: &str,
+    body_html: &str,
+) -> Result<SentMessage, ApiError> {
     let display_name = api.display_name().await;
     let encoded_thread_id = percent_encode_path_segment(thread_id);
     let url = format!(
@@ -110,8 +128,8 @@ pub async fn send_message(
     );
     let client_message_id = chrono::Utc::now().timestamp_millis().to_string();
     let body = SendMessageRequest {
-        content: format!("<p>{}</p>", html_escape(body_plain)),
-        messagetype: "RichText/Html",
+        content: body_html.to_string(),
+        messagetype: "RichText/Html".to_string(),
         contenttype: "text",
         clientmessageid: client_message_id.clone(),
         imdisplayname: &display_name,
@@ -128,6 +146,91 @@ pub async fn send_message(
         id: response.server_message_id(),
         client_message_id,
     })
+}
+
+pub async fn send_swift_adaptive_card(
+    api: &ApiClient,
+    thread_id: &str,
+    card: &serde_json::Value,
+) -> Result<SentMessage, ApiError> {
+    let display_name = api.display_name().await;
+    let tenant_id = api.tenant_id().await;
+    let encoded_thread_id = percent_encode_path_segment(thread_id);
+    let url = format!(
+        "{}/v1/users/ME/conversations/{}/messages",
+        api.chat_service().await,
+        encoded_thread_id
+    );
+    let summary = card_summary_text(card);
+    let client_message_id = chrono::Utc::now().timestamp_millis().to_string();
+    let body = SendMessageRequest {
+        content: swift_card_content(&summary, card, &tenant_id),
+        messagetype: "RichText/Media_Card".to_string(),
+        contenttype: "text",
+        clientmessageid: client_message_id.clone(),
+        imdisplayname: &display_name,
+        properties: SendMessageProperties {
+            importance: "",
+            subject: None,
+            links: Vec::new(),
+        },
+    };
+    let response = api
+        .post_json::<SendMessageResponse, _>(&url, AuthStyle::SkypeHeader, &body)
+        .await?;
+    Ok(SentMessage {
+        id: response.server_message_id(),
+        client_message_id,
+    })
+}
+
+fn swift_card_content(summary: &str, card: &serde_json::Value, tenant_id: &str) -> String {
+    let envelope = serde_json::json!({
+        "summary": summary,
+        "attachments": [{
+            "content": card,
+            "contentType": ADAPTIVE_CARD_CONTENT_TYPE
+        }],
+        "type": "message/card",
+        "entities": [],
+        "channelData": {
+            "tenant": {
+                "id": tenant_id
+            }
+        }
+    });
+    let swift = base64::engine::general_purpose::STANDARD.encode(envelope.to_string());
+    let escaped_summary = xml_escape(summary);
+    format!(
+        "<URIObject type=\"SWIFT.1\" url_thumbnail=\"{SWIFT_THUMBNAIL_URL}\">{escaped_summary}<Title>{escaped_summary}</Title><Swift b64=\"{swift}\" /><Description /></URIObject>"
+    )
+}
+
+fn card_summary_text(card: &serde_json::Value) -> String {
+    card.get("body")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|body| body.iter().find_map(text_block_text))
+        .or_else(|| card.get("fallbackText").and_then(serde_json::Value::as_str))
+        .unwrap_or("Card")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+fn text_block_text(value: &serde_json::Value) -> Option<&str> {
+    if value.get("type").and_then(serde_json::Value::as_str) == Some("TextBlock") {
+        return value.get("text").and_then(serde_json::Value::as_str);
+    }
+    value
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.iter().find_map(text_block_text))
+        .or_else(|| {
+            value
+                .get("columns")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|columns| columns.iter().find_map(text_block_text))
+        })
 }
 
 pub async fn read_messages(
@@ -197,13 +300,67 @@ pub async fn read_messages(
         .unwrap_or_else(|| ApiError::NotFound("no message endpoint succeeded".to_string())))
 }
 
+pub async fn read_messages_raw(
+    api: &ApiClient,
+    thread_id: &str,
+    limit: usize,
+) -> Result<serde_json::Value, ApiError> {
+    let encoded_thread_id = percent_encode_path_segment(thread_id);
+    let chat_service = api.chat_service().await;
+    let chat_svc_agg = api.chat_svc_agg().await;
+    let candidates = [
+        (
+            format!(
+                "{chat_service}/v1/users/ME/conversations/{encoded_thread_id}/messages?view=msnp24Equivalent&pageSize={limit}"
+            ),
+            AuthStyle::SkypeHeader,
+        ),
+        (
+            format!(
+                "{chat_svc_agg}/api/v1/users/ME/conversations/{encoded_thread_id}/messages?view=msnp24Equivalent&pageSize={limit}"
+            ),
+            AuthStyle::SkypeHeader,
+        ),
+        (
+            format!(
+                "{chat_service}/v1/users/ME/conversations/{encoded_thread_id}/messages?pageSize={limit}"
+            ),
+            AuthStyle::BearerSkype,
+        ),
+    ];
+
+    let mut last_error = None;
+    for (url, style) in candidates {
+        match api.get_json::<serde_json::Value>(&url, style).await {
+            Ok(value) => {
+                return Ok(serde_json::json!({
+                    "endpoint": url,
+                    "response": value
+                }));
+            }
+            Err(ApiError::Http { status, body }) if matches!(status, 400 | 401 | 403 | 404) => {
+                last_error = Some(ApiError::Http { status, body });
+            }
+            Err(ApiError::NotFound(body)) => last_error = Some(ApiError::NotFound(body)),
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| ApiError::NotFound("no raw message endpoint succeeded".to_string())))
+}
+
 pub fn html_escape(input: &str) -> String {
+    rich_text::html_escape(input)
+}
+
+fn xml_escape(input: &str) -> String {
     input
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-        .replace('\n', "<br/>")
+        .replace('\'', "&apos;")
 }
 
 pub fn percent_encode_path_segment(input: &str) -> String {
@@ -554,6 +711,38 @@ mod tests {
         let response: SendMessageResponse = serde_json::from_str("{}").expect("response");
 
         assert_eq!(response.server_message_id(), None);
+    }
+
+    #[test]
+    fn serializes_swift_adaptive_card_content() {
+        let card = serde_json::json!({
+            "type": "AdaptiveCard",
+            "version": "1.2",
+            "body": [{ "type": "TextBlock", "text": "hello <card>" }]
+        });
+
+        let content = swift_card_content("hello <card>", &card, "tenant");
+        let encoded = content
+            .split("b64=\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("swift b64");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode");
+        let envelope: serde_json::Value = serde_json::from_slice(&decoded).expect("json");
+
+        assert!(!content.contains("RichText"));
+        assert!(content.contains("hello &lt;card&gt;"));
+        assert_eq!(envelope["type"], "message/card");
+        assert_eq!(
+            envelope["attachments"][0]["contentType"],
+            ADAPTIVE_CARD_CONTENT_TYPE
+        );
+        assert_eq!(
+            envelope["attachments"][0]["content"]["body"][0]["text"],
+            "hello <card>"
+        );
     }
 
     #[test]
