@@ -3,7 +3,7 @@ use crate::auth::{Session, USER_AGENT};
 use crate::commands::target::{self, TargetResolution, TargetSource};
 use crate::config::AppPaths;
 use crate::error::CliError;
-use crate::util::rich_text::{prepare_message, MessageFormat, PreparedMessage};
+use crate::util::rich_text::{prepare_message, PreparedMessage};
 use serde_json::json;
 use std::fs;
 use std::io::Read;
@@ -16,7 +16,6 @@ pub struct ChannelOptions<'a> {
     pub channel: &'a str,
     pub message: Option<&'a str>,
     pub read_stdin: bool,
-    pub format: &'a str,
     pub card_json: Option<&'a str>,
     pub confirm_thread_id: Option<&'a str>,
     pub dry_run: bool,
@@ -28,14 +27,12 @@ pub async fn channel(options: ChannelOptions<'_>) -> Result<(), CliError> {
         channel,
         message,
         read_stdin,
-        format,
         card_json,
         confirm_thread_id,
         dry_run,
         json_output,
     } = options;
-    let format = MessageFormat::parse(format)?;
-    validate_message_args(message, read_stdin, format, card_json, dry_run)?;
+    validate_message_args(message, read_stdin, card_json, dry_run)?;
     let paths = AppPaths::resolve()?;
     if card_json.is_some() && !dry_run && !experimental_card_post_enabled() {
         let resolution = target::resolve_local_channel_target(&paths, channel)?;
@@ -53,9 +50,7 @@ pub async fn channel(options: ChannelOptions<'_>) -> Result<(), CliError> {
         if let Some(resolution) = target::resolve_local_channel_target(&paths, channel)? {
             validate_confirm_thread_id(&resolution, confirm_thread_id)?;
             let message = message_body(message, read_stdin)?;
-            let message = message
-                .as_deref()
-                .map(|message| prepare_message(message, format));
+            let message = message.as_deref().map(prepare_message);
             let card = card_body(card_json)?;
             print_dry_run(
                 channel,
@@ -75,9 +70,7 @@ pub async fn channel(options: ChannelOptions<'_>) -> Result<(), CliError> {
     validate_confirm_thread_id(&resolution, confirm_thread_id)?;
     require_confirmation_for_json_post(&resolution, confirm_thread_id, dry_run, json_output)?;
     let raw_message = message_body(message, read_stdin)?;
-    let prepared_message = raw_message
-        .as_deref()
-        .map(|message| prepare_message(message, format));
+    let prepared_message = raw_message.as_deref().map(prepare_message);
     let card = card_body(card_json)?;
     if dry_run {
         print_dry_run(
@@ -105,15 +98,8 @@ pub async fn channel(options: ChannelOptions<'_>) -> Result<(), CliError> {
                 2,
             ));
         };
-        let sent = if matches!(message.format, MessageFormat::Text) {
-            let raw_message = raw_message
-                .as_deref()
-                .expect("raw message exists when prepared message exists");
-            messages::send_message(&api, &thread_id, raw_message).await?
-        } else {
-            messages::send_html_message(&api, &thread_id, &message.html).await?
-        };
-        (sent, message.format.as_str())
+        let sent = messages::send_html_message(&api, &thread_id, &message.html).await?;
+        (sent, "markdown")
     };
     if json_output {
         println!(
@@ -165,7 +151,7 @@ fn print_dry_run(
                 "channel_summary": resolution.chat,
                 "message": message.map(|message| json!({
                     "content_type": "RichText/Html",
-                    "format": message.format.as_str(),
+                    "format": "markdown",
                     "text_length": message.input_chars,
                     "html_length": message.html_chars(),
                     "html_escaped": message.html_escaped(),
@@ -232,7 +218,6 @@ fn card_body(card_json: Option<&str>) -> Result<Option<serde_json::Value>, CliEr
 fn validate_message_args(
     message: Option<&str>,
     read_stdin: bool,
-    format: MessageFormat,
     card_json: Option<&str>,
     dry_run: bool,
 ) -> Result<(), CliError> {
@@ -249,14 +234,6 @@ fn validate_message_args(
             "invalid_arguments",
             "--card-json cannot be provided together with MESSAGE or --stdin",
             json!({}),
-            2,
-        ));
-    }
-    if card_json.is_some() && !matches!(format, MessageFormat::Text) {
-        return Err(CliError::structured(
-            "invalid_arguments",
-            "--format cannot be provided together with --card-json",
-            json!({ "format": format.as_str() }),
             2,
         ));
     }
@@ -462,7 +439,7 @@ mod tests {
             }),
         };
 
-        let message = prepare_message("hello", MessageFormat::Text);
+        let message = prepare_message("hello");
         assert!(print_dry_run("Announcements", Some(&message), None, &resolution, true).is_ok());
     }
 

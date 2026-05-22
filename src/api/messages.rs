@@ -1,5 +1,4 @@
 use super::client::{ApiClient, ApiError, AuthStyle};
-use crate::util::rich_text;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -99,19 +98,6 @@ pub struct MessageAttachment {
     pub has_url: Option<bool>,
     #[serde(skip_serializing)]
     pub url: Option<String>,
-}
-
-pub async fn send_message(
-    api: &ApiClient,
-    thread_id: &str,
-    body_plain: &str,
-) -> Result<SentMessage, ApiError> {
-    send_html_message(
-        api,
-        thread_id,
-        &format!("<p>{}</p>", html_escape(body_plain)),
-    )
-    .await
 }
 
 pub async fn send_html_message(
@@ -348,10 +334,6 @@ pub async fn read_messages_raw(
 
     Err(last_error
         .unwrap_or_else(|| ApiError::NotFound("no raw message endpoint succeeded".to_string())))
-}
-
-pub fn html_escape(input: &str) -> String {
-    rich_text::html_escape(input)
 }
 
 fn xml_escape(input: &str) -> String {
@@ -677,11 +659,6 @@ fn is_empty_sender(sender: &MessageSender) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn html_escape_covers_special_chars_and_newline() {
-        assert_eq!(html_escape("<&>\"\nnext"), "&lt;&amp;&gt;&quot;<br/>next");
-    }
 
     #[test]
     fn percent_encodes_thread_id() {

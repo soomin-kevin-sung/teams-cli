@@ -71,23 +71,20 @@ pub enum Command {
         #[arg(long)]
         before: Option<String>,
     },
-    /// Send a text message to an existing 1:1, group, or self notes chat.
+    /// Send a Markdown message to an existing 1:1, group, or self notes chat.
     Send {
         /// Resolve and print the target without sending.
         #[arg(long)]
         dry_run: bool,
-        /// Read plaintext message body from stdin instead of MESSAGE.
+        /// Read Markdown message body from stdin instead of MESSAGE.
         #[arg(long)]
         stdin: bool,
-        /// Interpret MESSAGE/stdin as text, html, or markdown.
-        #[arg(long, default_value = "text", value_parser = ["text", "html", "markdown", "md"])]
-        format: String,
         /// Refuse to send unless the resolved thread id exactly matches this value.
         #[arg(long)]
         confirm_thread_id: Option<String>,
         /// Chat thread id, alias, self target (me/self/notes), exact email, exact display name, or exact chat title.
         chat: String,
-        /// Plaintext message body. Optional when --stdin is used.
+        /// Markdown message body. Optional when --stdin is used.
         message: Option<String>,
     },
     /// Post to Teams channels.
@@ -115,17 +112,14 @@ pub enum Command {
 
 #[derive(Subcommand, Debug)]
 pub enum PostCommand {
-    /// Post a text message to a channel root thread.
+    /// Post a Markdown message to a channel root thread.
     Channel {
         /// Resolve and print the target without posting.
         #[arg(long)]
         dry_run: bool,
-        /// Read plaintext message body from stdin instead of MESSAGE.
+        /// Read Markdown message body from stdin instead of MESSAGE.
         #[arg(long)]
         stdin: bool,
-        /// Interpret MESSAGE/stdin as text, html, or markdown.
-        #[arg(long, default_value = "text", value_parser = ["text", "html", "markdown", "md"])]
-        format: String,
         /// Read an Adaptive Card JSON body from this file instead of MESSAGE.
         #[arg(long)]
         card_json: Option<String>,
@@ -134,7 +128,7 @@ pub enum PostCommand {
         confirm_thread_id: Option<String>,
         /// Channel thread id, alias, or exact cached channel title.
         channel: String,
-        /// Plaintext message body. Optional for --dry-run or when --stdin/--card-json is used.
+        /// Markdown message body. Optional for --dry-run or when --stdin/--card-json is used.
         message: Option<String>,
     },
 }

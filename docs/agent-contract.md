@@ -7,7 +7,7 @@ This document describes the stable automation-facing behavior for `teams --json`
 - Success output is JSON on stdout.
 - Error output is JSON on stderr.
 - Human login device-code prompts are written to stderr so `teams --json login` can keep final success JSON on stdout after authentication completes.
-- Message bodies are not echoed by `send --dry-run --json` or `post channel --dry-run --json`, including `--format html` and `--format markdown`.
+- Message bodies are not echoed by `send --dry-run --json` or `post channel --dry-run --json`.
 
 ## Error Envelope
 
@@ -95,7 +95,10 @@ Most commands include `ok: true` plus command-specific fields. Examples below om
   "thread_id": "19:...",
   "message": {
     "content_type": "RichText/Html",
+    "format": "markdown",
     "text_length": 17,
+    "html_length": 24,
+    "markdown_converted": true,
     "html_escaped": true
   }
 }
@@ -117,7 +120,7 @@ Most commands include `ok: true` plus command-specific fields. Examples below om
 
 `id` may be `null` even when Teams returned HTTP 201. Treat `sent: true` plus `client_message_id` as the success signal.
 
-`send` and `post channel` accept `--format text`, `--format html`, or `--format markdown` for MESSAGE/stdin input. `text` is escaped and wrapped as Teams `RichText/Html`; `markdown` is converted to safe HTML; `html` is sent as explicit raw `RichText/Html`.
+`send` and `post channel` interpret MESSAGE/stdin input as Markdown, convert it to safe HTML, and send Teams `RichText/Html`.
 
 ### Channel Post Dry Run
 
@@ -144,10 +147,10 @@ When a message is supplied to `post channel --dry-run`, the `message` object con
 {
   "message": {
     "content_type": "RichText/Html",
-    "format": "text",
+    "format": "markdown",
     "text_length": 17,
     "html_length": 24,
-    "markdown_converted": false,
+    "markdown_converted": true,
     "html_escaped": true
   }
 }

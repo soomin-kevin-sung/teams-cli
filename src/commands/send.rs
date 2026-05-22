@@ -3,7 +3,7 @@ use crate::auth::{Session, USER_AGENT};
 use crate::commands::target::{self, TargetResolution, TargetSource};
 use crate::config::AppPaths;
 use crate::error::CliError;
-use crate::util::rich_text::{prepare_message, MessageFormat, PreparedMessage};
+use crate::util::rich_text::{prepare_message, PreparedMessage};
 use serde_json::json;
 use std::io::Read;
 
@@ -13,19 +13,17 @@ pub async fn run(
     chat: &str,
     message: Option<&str>,
     read_stdin: bool,
-    format: &str,
     confirm_thread_id: Option<&str>,
     dry_run: bool,
     json_output: bool,
 ) -> Result<(), CliError> {
-    let format = MessageFormat::parse(format)?;
     validate_message_args(message, read_stdin)?;
     let paths = AppPaths::resolve()?;
     if dry_run {
         if let Some(resolution) = target::resolve_local_target(&paths, chat)? {
             validate_confirm_thread_id(&resolution, confirm_thread_id)?;
             let message = message_body(message, read_stdin)?;
-            let prepared = prepare_message(&message, format);
+            let prepared = prepare_message(&message);
             print_dry_run(chat, &prepared, &resolution, json_output)?;
             return Ok(());
         }
@@ -38,18 +36,14 @@ pub async fn run(
     validate_confirm_thread_id(&resolution, confirm_thread_id)?;
     require_confirmation_for_json_send(&resolution, confirm_thread_id, dry_run, json_output)?;
     let message = message_body(message, read_stdin)?;
-    let prepared = prepare_message(&message, format);
+    let prepared = prepare_message(&message);
     if dry_run {
         print_dry_run(chat, &prepared, &resolution, json_output)?;
         return Ok(());
     }
 
     let thread_id = resolution.thread_id.clone();
-    let sent = if matches!(prepared.format, MessageFormat::Text) {
-        messages::send_message(&api, &thread_id, &message).await?
-    } else {
-        messages::send_html_message(&api, &thread_id, &prepared.html).await?
-    };
+    let sent = messages::send_html_message(&api, &thread_id, &prepared.html).await?;
     if json_output {
         println!(
             "{}",
@@ -57,7 +51,7 @@ pub async fn run(
                 "ok": true,
                 "sent": true,
                 "dry_run": false,
-                "format": prepared.format.as_str(),
+                "format": "markdown",
                 "id": sent.id,
                 "client_message_id": sent.client_message_id,
                 "target": chat,
@@ -96,7 +90,7 @@ fn print_dry_run(
                 "chat_summary": resolution.chat,
                 "message": {
                     "content_type": "RichText/Html",
-                    "format": message.format.as_str(),
+                    "format": "markdown",
                     "text_length": message.input_chars,
                     "html_length": message.html_chars(),
                     "html_escaped": message.html_escaped(),
@@ -262,13 +256,6 @@ mod tests {
         assert!(validate_message_args(None, false).is_err());
         assert_eq!(message_body(Some("hello"), false).expect("body"), "hello");
         assert!(validate_message_args(Some("hello"), true).is_err());
-    }
-
-    #[test]
-    fn invalid_format_is_structured() {
-        let error = MessageFormat::parse("rtf").expect_err("invalid");
-
-        assert_eq!(error.code(), "invalid_arguments");
     }
 
     #[test]
